@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "opening-quest",
+      "runtimeExecutable": "C:\\Claude\\tools\\node\\node.exe",
+      "runtimeArgs": [
+        "C:\\Claude\\chess-opening-trainer\\node_modules\\vite\\bin\\vite.js",
+        "C:\\Claude\\chess-opening-trainer",
+        "--port",
+        "5174",
+        "--strictPort"
+      ],
+      "port": 5174
+    }
+  ]
+}

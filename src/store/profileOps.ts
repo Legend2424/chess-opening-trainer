@@ -1,0 +1,707 @@
+// Pure, immutable operations on AppData (DESIGN.md §3). Runs under plain node.
+//
+// Every op returns a NEW AppData (or the same object when nothing changed) and
+// never mutates its input. Economy rules: coins never go negative; buying
+// needs enough coins + the item's minLevel and can't buy twice; redemptions
+// deduct immediately and refund on decline; weekly cap per reward per profile
+// (rolling 7 days); engine games capped per day; daily rollover by LOCAL date.
+
+import type {
+  AchievementDef,
+  AppData,
+  CoinEvent,
+  LevelInfo,
+  LineStats,
+  ParentSettings,
+  Profile,
+  ProfileSettings,
+  Redemption,
+  Repertoire,
+  Reward,
+  RewardDef,
+  RewardLine,
+} from '../types.ts'
+import { checkAchievements } from './achievements.ts'
+import type { AchievementContext, LineResultInputX } from './achievements.ts'
+import { findItem, itemById } from './catalog.ts'
+import { createProfile, defaultSeedFor, HISTORY_CAP, localDateKey } from './defaults.ts'
+import type { DailyStateX } from './defaults.ts'
+import { levelForXp, levelUpBetween } from './levels.ts'
+import {
+  clampDailyGoal,
+  computeLineReward,
+  DAY_MS,
+  distinctLineIdsOf,
+  effectiveDaily,
+  ENGINE_DAILY_CAP,
+  engineGameCoins,
+  isLineMastered,
+  nextLineStats,
+  nonNegInt,
+  rolloverDaily,
+} from './rewards.ts'
+import type { EngineResult } from './rewards.ts'
+
+export const WEEK_MS = 7 * DAY_MS
+export const MAX_COIN_ADJUST = 100000
+export const RESOLVED_REDEMPTIONS_KEPT = 100
+/** A second request for the same reward within this window is a double tap: ignored. */
+export const REDEMPTION_DOUBLE_TAP_MS = 10_000
+
+// ---------------------------------------------------------------------------
+// Results & errors
+// ---------------------------------------------------------------------------
+
+export type OpError =
+  | 'no-profile'
+  | 'unknown-item'
+  | 'already-owned'
+  | 'not-owned'
+  | 'not-equippable'
+  | 'not-enough-coins'
+  | 'level-too-low'
+  | 'unknown-reward'
+  | 'reward-disabled'
+  | 'weekly-limit'
+  | 'not-pending'
+  | 'invalid'
+
+/** Kid-friendly messages for each error code. */
+export const OP_ERROR_MESSAGES: Record<OpError, string> = {
+  'no-profile': 'Pick a player first!',
+  'unknown-item': "Hmm, we couldn't find that item.",
+  'already-owned': 'You already have this one! 🎉',
+  'not-owned': "You don't have that one yet.",
+  'not-equippable': 'Trophies live on your shelf — they are always on show!',
+  'not-enough-coins': 'Not enough coins yet — keep practising! 💪',
+  'level-too-low': 'Level up a bit more to unlock this! ⭐',
+  'unknown-reward': "Hmm, we couldn't find that reward.",
+  'reward-disabled': 'This reward is switched off right now.',
+  'weekly-limit': "You've asked for this one enough this week. Try again in a few days! 📅",
+  'not-pending': 'That request was already answered.',
+  'invalid': "That didn't look right — please try again.",
+}
+
+export interface OpResult {
+  data: AppData
+  ok: boolean
+  error?: OpError
+  message?: string
+}
+
+export interface ShopResult extends OpResult {
+  newAchievements: AchievementDef[]
+  levelUp: { from: LevelInfo; to: LevelInfo } | null
+}
+
+export interface LineResultOutcome {
+  data: AppData
+  reward: Reward
+  ok: boolean
+  /** Identical result (same line + same `now`) was already applied: ignored. */
+  duplicate: boolean
+  /** True when the anti-farming rule applied (flat 2 coins). */
+  farmed: boolean
+}
+
+export interface EngineGameOutcome extends OpResult {
+  coins: number
+  /** Daily cap reached: the game counted for stats but earned no coins. */
+  capped: boolean
+  newAchievements: AchievementDef[]
+  levelUp: { from: LevelInfo; to: LevelInfo } | null
+}
+
+function fail(data: AppData, error: OpError): OpResult {
+  return { data, ok: false, error, message: OP_ERROR_MESSAGES[error] }
+}
+
+function failShop(data: AppData, error: OpError): ShopResult {
+  return { ...fail(data, error), newAchievements: [], levelUp: null }
+}
+
+// ---------------------------------------------------------------------------
+// Profile helpers
+// ---------------------------------------------------------------------------
+
+export function getProfile(data: AppData, profileId: string | null | undefined): Profile | undefined {
+  if (!profileId) return undefined
+  return data.profiles.find((p) => p.id === profileId)
+}
+
+export function getActiveProfile(data: AppData): Profile | null {
+  return getProfile(data, data.activeProfileId) ?? null
+}
+
+/** Replace one profile (identity-preserving when unchanged). */
+export function withProfile(data: AppData, profile: Profile): AppData {
+  const i = data.profiles.findIndex((p) => p.id === profile.id)
+  if (i < 0 || data.profiles[i] === profile) return data
+  const profiles = data.profiles.slice()
+  profiles[i] = profile
+  return { ...data, profiles }
+}
+
+function withParent(data: AppData, patch: Partial<ParentSettings>): AppData {
+  return { ...data, parent: { ...data.parent, ...patch } }
+}
+
+export function levelOf(profile: Profile): LevelInfo {
+  return levelForXp(profile.xp)
+}
+
+/** Prepend a coin event, newest first, capped at HISTORY_CAP. */
+export function pushHistory(history: CoinEvent[], ev: CoinEvent): CoinEvent[] {
+  const next = [ev, ...history]
+  return next.length > HISTORY_CAP ? next.slice(0, HISTORY_CAP) : next
+}
+
+/**
+ * Add (or remove) coins. Positive deltas from earning also add XP when
+ * `earned` is true; negative deltas never take coins below 0. Records history.
+ */
+export function addCoins(profile: Profile, delta: number, reason: string, now: number, earned: boolean): Profile {
+  const d = Number.isFinite(delta) ? Math.trunc(delta) : 0
+  if (d === 0) return profile
+  const coins = Math.max(0, nonNegInt(profile.coins) + d)
+  const actual = coins - nonNegInt(profile.coins)
+  if (actual === 0) return profile
+  const xp = nonNegInt(profile.xp) + (earned && actual > 0 ? actual : 0)
+  return { ...profile, coins, xp, history: pushHistory(profile.history, { at: now, delta: actual, reason }) }
+}
+
+/** Grant newly unlocked achievements (coins + xp + timestamp). Each id at most once. */
+function grantAchievements(profile: Profile, defs: AchievementDef[], now: number): Profile {
+  let p = profile
+  for (const a of defs) {
+    if (p.achievements[a.id] !== undefined) continue
+    p = { ...p, achievements: { ...p.achievements, [a.id]: now } }
+    p = addCoins(p, a.coins, `🏅 ${a.name}`, now, true)
+  }
+  return p
+}
+
+function unlockAndGrant(profile: Profile, ctx: AchievementContext): { profile: Profile; unlocked: AchievementDef[] } {
+  const unlocked = checkAchievements(profile, ctx)
+  return { profile: grantAchievements(profile, unlocked, ctx.now), unlocked }
+}
+
+// ---------------------------------------------------------------------------
+// Daily rollover & streaks
+// ---------------------------------------------------------------------------
+
+/**
+ * Reset `daily` on a new LOCAL date. The streak survives the rollover only if
+ * the goal was met yesterday (or today); otherwise it shows 0 and restarts at 1
+ * with the next goal. Daily state dated more than a day ahead (wrong clock) is
+ * reset too. Returns the same object when nothing changes. (= rewards.rolloverDaily)
+ */
+export function ensureDaily(profile: Profile, now: number): Profile {
+  return rolloverDaily(profile, now)
+}
+
+/** ensureDaily on EVERY profile (call on app start, after imports, on focus, every minute). Identity-preserving. */
+export function rolloverAll(data: AppData, now: number): AppData {
+  let out = data
+  for (const p of data.profiles) out = withProfile(out, ensureDaily(p, now))
+  return out
+}
+
+/** Daily view for display without committing (e.g. the Home goal ring). */
+export function currentDaily(profile: Profile, now: number): DailyStateX {
+  return effectiveDaily(profile, now)
+}
+
+export function dailyGoalProgress(profile: Profile, now: number, goalLines: number): { done: number; goal: number; met: boolean } {
+  const d = effectiveDaily(profile, now)
+  const goal = clampDailyGoal(goalLines)
+  const done = distinctLineIdsOf(d).length
+  return { done, goal, met: d.goalClaimed || done >= goal }
+}
+
+export { currentStreak } from './rewards.ts'
+
+/** Apply ensureDaily to one profile inside AppData. */
+export function rolloverProfile(data: AppData, profileId: string, now: number): AppData {
+  const p = getProfile(data, profileId)
+  return p ? withProfile(data, ensureDaily(p, now)) : data
+}
+
+// ---------------------------------------------------------------------------
+// Line results
+// ---------------------------------------------------------------------------
+
+function emptyReward(): Reward {
+  return { coins: 0, breakdown: [], stars: 1, newAchievements: [], levelUp: null, dailyGoalJustMet: false, lineMastered: false }
+}
+
+/**
+ * Apply a completed line: rewards, line stats (DESIGN.md §1 rule), totals,
+ * daily goal + streak, combo, achievements, level-up.
+ *
+ * `reward.coins` is the TOTAL coins this completion earned, including any
+ * achievement bonuses; `reward.breakdown` sums to it (achievement chips are
+ * labelled "🏅 <name>").
+ */
+export function applyLineResult(
+  data: AppData,
+  profileId: string,
+  input: LineResultInputX,
+  rep?: Repertoire | null,
+): LineResultOutcome {
+  const p0 = getProfile(data, profileId)
+  if (!p0 || !input || !input.line || typeof input.line.id !== 'string' || !Number.isFinite(input.now)) {
+    return { data, reward: emptyReward(), ok: false, duplicate: false, farmed: false }
+  }
+  const now = input.now
+  const line = input.line
+  const prevStats: LineStats | undefined = p0.lineStats[line.id]
+  if (prevStats && prevStats.lastPracticed === now) {
+    // Same completion submitted twice (e.g. a double-fired effect): ignore.
+    return { data, reward: emptyReward(), ok: true, duplicate: true, farmed: false }
+  }
+
+  let p = ensureDaily(p0, now)
+  const xpBefore = p.xp
+  const r = computeLineReward(input, p, data.parent.dailyGoalLines)
+
+  // Line stats
+  const newStats = nextLineStats(
+    prevStats,
+    { mistakes: input.mistakes, hintsUsed: input.hintsUsed, usedArrowHint: input.usedArrowHint, learnMode: input.learnMode },
+    now,
+  )
+  const lineMastered = !isLineMastered(prevStats) && isLineMastered(newStats)
+
+  // Totals. Farmed runs (quick repeats of a line just done well) pay a flat 2
+  // coins and count toward nothing else: not lines/perfects (→ achievements),
+  // not bestCombo, not today's perfects.
+  const counts = !r.farmed
+  const perfectCounted = r.perfect && counts
+  const t = p.totals
+  const totals = {
+    lines: nonNegInt(t.lines) + (counts ? 1 : 0),
+    perfects: nonNegInt(t.perfects) + (perfectCounted ? 1 : 0),
+    mistakesFixed: nonNegInt(t.mistakesFixed) + nonNegInt(input.mistakes),
+    engineWins: nonNegInt(t.engineWins),
+    blundersPunished: nonNegInt(t.blundersPunished) + (r.punishedBlunder ? 1 : 0),
+  }
+
+  // Daily
+  const d0 = effectiveDaily(p, now)
+  const ids = distinctLineIdsOf(d0)
+  const distinctLineIds = r.countsTowardGoal ? [...ids, line.id] : ids
+  const openingId = input.openingId || line.openingId
+  const daily: DailyStateX = {
+    ...d0,
+    lines: distinctLineIds.length,
+    perfects: nonNegInt(d0.perfects) + (perfectCounted ? 1 : 0),
+    coinsEarned: nonNegInt(d0.coinsEarned) + r.coins,
+    goalClaimed: d0.goalClaimed || r.dailyGoalJustMet,
+    openingsPracticed: openingId && !d0.openingsPracticed.includes(openingId) ? [...d0.openingsPracticed, openingId] : d0.openingsPracticed,
+    distinctLineIds,
+  }
+
+  const combo = perfectCounted ? nonNegInt(input.combo) : 0
+  p = {
+    ...p,
+    lineStats: { ...p.lineStats, [line.id]: newStats },
+    totals,
+    daily,
+    bestCombo: Math.max(nonNegInt(p.bestCombo), combo),
+    streakDays: r.dailyGoalJustMet ? r.streakDays : p.streakDays,
+    lastGoalDate: r.dailyGoalJustMet ? localDateKey(now) : p.lastGoalDate,
+  }
+  p = addCoins(p, r.coins, `🎓 ${line.chapterTitle || 'Line'} · ${line.name || 'line'}`, now, true)
+
+  // Achievements
+  const { profile: p2, unlocked } = unlockAndGrant(p, { now, line: input, rep: rep ?? null })
+  p = p2
+  const achCoins = unlocked.reduce((s, a) => s + a.coins, 0)
+  if (achCoins > 0) {
+    const dd = p.daily as DailyStateX
+    p = { ...p, daily: { ...dd, coinsEarned: nonNegInt(dd.coinsEarned) + achCoins } as DailyStateX }
+  }
+
+  const breakdown: RewardLine[] = [
+    ...r.breakdown,
+    ...unlocked.map((a) => ({ label: `🏅 ${a.name}`, coins: a.coins, emoji: a.emoji })),
+  ]
+  const reward: Reward = {
+    coins: r.coins + achCoins,
+    breakdown,
+    stars: r.stars,
+    newAchievements: unlocked,
+    levelUp: levelUpBetween(xpBefore, p.xp),
+    dailyGoalJustMet: r.dailyGoalJustMet,
+    lineMastered,
+  }
+  return { data: withProfile(data, p), reward, ok: true, duplicate: false, farmed: r.farmed }
+}
+
+// ---------------------------------------------------------------------------
+// Engine games
+// ---------------------------------------------------------------------------
+
+export function applyEngineGame(data: AppData, profileId: string, result: EngineResult, rating: number, now: number): EngineGameOutcome {
+  const p0 = getProfile(data, profileId)
+  if (!p0 || (result !== 'win' && result !== 'draw' && result !== 'loss')) {
+    return { ...fail(data, p0 ? 'invalid' : 'no-profile'), coins: 0, capped: false, newAchievements: [], levelUp: null }
+  }
+  let p = ensureDaily(p0, now)
+  const xpBefore = p.xp
+  const base = engineGameCoins(result, rating)
+  const daily = p.daily as DailyStateX
+  const capped = base > 0 && nonNegInt(daily.engineGamesRewarded) >= ENGINE_DAILY_CAP
+  const coins = capped ? 0 : base
+
+  if (result === 'win') p = { ...p, totals: { ...p.totals, engineWins: nonNegInt(p.totals.engineWins) + 1 } }
+  if (coins > 0) {
+    p = {
+      ...p,
+      daily: {
+        ...daily,
+        engineGamesRewarded: nonNegInt(daily.engineGamesRewarded) + 1,
+        coinsEarned: nonNegInt(daily.coinsEarned) + coins,
+      } as DailyStateX,
+    }
+    p = addCoins(p, coins, result === 'win' ? '🤖 Beat the computer' : '🤖 Draw vs the computer', now, true)
+  }
+  const { profile: p2, unlocked } = unlockAndGrant(p, { now })
+  p = p2
+  return {
+    data: withProfile(data, p),
+    ok: true,
+    coins,
+    capped,
+    newAchievements: unlocked,
+    levelUp: levelUpBetween(xpBefore, p.xp),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shop
+// ---------------------------------------------------------------------------
+
+export function canBuy(profile: Profile, itemId: string): { ok: boolean; error?: OpError } {
+  const item = itemById(itemId)
+  if (!item) return { ok: false, error: 'unknown-item' }
+  if (profile.owned.includes(item.id)) return { ok: false, error: 'already-owned' }
+  if (item.minLevel !== undefined && levelOf(profile).level < item.minLevel) return { ok: false, error: 'level-too-low' }
+  if (nonNegInt(profile.coins) < item.cost) return { ok: false, error: 'not-enough-coins' }
+  return { ok: true }
+}
+
+export function buyItem(data: AppData, profileId: string, itemId: string, now: number): ShopResult {
+  const p0 = getProfile(data, profileId)
+  if (!p0) return failShop(data, 'no-profile')
+  const check = canBuy(p0, itemId)
+  if (!check.ok) return failShop(data, check.error!)
+  const item = itemById(itemId)!
+  let p: Profile = { ...p0, owned: [...p0.owned, item.id] }
+  if (item.cost > 0) p = addCoins(p, -item.cost, `🛒 ${item.name}`, now, false)
+  const { profile: p2, unlocked } = unlockAndGrant(p, { now })
+  return { data: withProfile(data, p2), ok: true, newAchievements: unlocked, levelUp: levelUpBetween(p0.xp, p2.xp) }
+}
+
+/** Equip an owned item. Avatars set profile.avatar; trophies can't be equipped. */
+export function equipItem(data: AppData, profileId: string, itemId: string): OpResult {
+  const p = getProfile(data, profileId)
+  if (!p) return fail(data, 'no-profile')
+  const item = itemById(itemId)
+  if (!item) return fail(data, 'unknown-item')
+  if (!p.owned.includes(item.id)) return fail(data, 'not-owned')
+  switch (item.kind) {
+    case 'avatar':
+      return { data: withProfile(data, { ...p, avatar: item.refId }), ok: true }
+    case 'board':
+    case 'pieces':
+    case 'effect':
+    case 'title':
+      return { data: withProfile(data, { ...p, equipped: { ...p.equipped, [item.kind]: item.refId } }), ok: true }
+    default:
+      return fail(data, 'not-equippable')
+  }
+}
+
+export function isEquipped(profile: Profile, itemId: string): boolean {
+  const item = itemById(itemId)
+  if (!item) return false
+  if (item.kind === 'avatar') return profile.avatar === item.refId
+  if (item.kind === 'trophy') return false
+  return profile.equipped[item.kind] === item.refId
+}
+
+// ---------------------------------------------------------------------------
+// Real-world rewards (redemptions)
+// ---------------------------------------------------------------------------
+
+/** Non-declined requests for this reward in the rolling 7 days before `now`. */
+export function redemptionsThisWeek(profile: Profile, rewardId: string, now: number): number {
+  return profile.redemptions.filter(
+    (r) => r.rewardId === rewardId && r.status !== 'declined' && now - r.requestedAt < WEEK_MS,
+  ).length
+}
+
+export function canRequestRedemption(profile: Profile, reward: RewardDef | undefined, now: number): { ok: boolean; error?: OpError } {
+  if (!reward) return { ok: false, error: 'unknown-reward' }
+  if (!reward.enabled) return { ok: false, error: 'reward-disabled' }
+  if (reward.maxPerWeek !== undefined && redemptionsThisWeek(profile, reward.id, now) >= reward.maxPerWeek) {
+    return { ok: false, error: 'weekly-limit' }
+  }
+  if (nonNegInt(profile.coins) < nonNegInt(reward.cost)) return { ok: false, error: 'not-enough-coins' }
+  return { ok: true }
+}
+
+function trimRedemptions(list: Redemption[]): Redemption[] {
+  const resolved = list.filter((r) => r.status !== 'pending')
+  if (resolved.length <= RESOLVED_REDEMPTIONS_KEPT) return list
+  const keep = new Set(resolved.slice(0, RESOLVED_REDEMPTIONS_KEPT))
+  return list.filter((r) => r.status === 'pending' || keep.has(r))
+}
+
+export interface RedemptionResult extends OpResult {
+  redemption?: Redemption
+  /** A pending request for the same reward was made seconds ago (double tap): nothing changed, `redemption` is that one. */
+  duplicate?: boolean
+}
+
+/**
+ * Ask for a real reward: coins are deducted now (refunded if a parent declines).
+ * A repeat request for the same reward within REDEMPTION_DOUBLE_TAP_MS is
+ * treated as a double tap: ok, nothing charged, returns the existing request.
+ */
+export function requestRedemption(data: AppData, profileId: string, rewardId: string, now: number): RedemptionResult {
+  const p0 = getProfile(data, profileId)
+  if (!p0) return fail(data, 'no-profile')
+  const recent = p0.redemptions.find(
+    (r) => r.rewardId === rewardId && r.status === 'pending' && Math.abs(now - r.requestedAt) < REDEMPTION_DOUBLE_TAP_MS,
+  )
+  if (recent) return { data, ok: true, redemption: recent, duplicate: true }
+  const reward = data.parent.rewards.find((r) => r.id === rewardId)
+  const check = canRequestRedemption(p0, reward, now)
+  if (!check.ok) return fail(data, check.error!)
+  const rw = reward!
+  const cost = nonNegInt(rw.cost)
+  const redemption: Redemption = {
+    // Profile id included so ids are unique across players (safe as React keys in the parent list).
+    id: `${rw.id}-${p0.id}-${now.toString(36)}-${p0.redemptions.length.toString(36)}`,
+    rewardId: rw.id,
+    rewardName: rw.name,
+    emoji: rw.emoji,
+    cost,
+    requestedAt: now,
+    status: 'pending',
+  }
+  let p: Profile = { ...p0, redemptions: trimRedemptions([redemption, ...p0.redemptions]) }
+  p = addCoins(p, -cost, `🎁 Asked for ${rw.name}`, now, false)
+  return { data: withProfile(data, p), ok: true, redemption }
+}
+
+/** Parent approves or declines a pending request. Decline refunds the coins (no XP). */
+export function resolveRedemption(data: AppData, profileId: string, redemptionId: string, approve: boolean, now: number): ShopResult {
+  const p0 = getProfile(data, profileId)
+  if (!p0) return failShop(data, 'no-profile')
+  const red = p0.redemptions.find((r) => r.id === redemptionId)
+  if (!red || red.status !== 'pending') return failShop(data, 'not-pending')
+  const updated: Redemption = { ...red, status: approve ? 'approved' : 'declined', resolvedAt: now }
+  let p: Profile = { ...p0, redemptions: p0.redemptions.map((r) => (r === red ? updated : r)) }
+  if (!approve) p = addCoins(p, red.cost, `↩️ Refund: ${red.rewardName}`, now, false)
+  const { profile: p2, unlocked } = unlockAndGrant(p, { now })
+  return { data: withProfile(data, p2), ok: true, newAchievements: unlocked, levelUp: levelUpBetween(p0.xp, p2.xp) }
+}
+
+/** All pending requests across profiles (for the Parent zone). */
+export function pendingRedemptions(data: AppData): Array<{ profileId: string; profileName: string; redemption: Redemption }> {
+  const out: Array<{ profileId: string; profileName: string; redemption: Redemption }> = []
+  for (const p of data.profiles) {
+    for (const r of p.redemptions) if (r.status === 'pending') out.push({ profileId: p.id, profileName: p.name, redemption: r })
+  }
+  return out.sort((a, b) => a.redemption.requestedAt - b.redemption.requestedAt)
+}
+
+// ---------------------------------------------------------------------------
+// Parent: coins, profiles
+// ---------------------------------------------------------------------------
+
+/** Parent gift (+, counts toward XP) or removal (−, never below 0). */
+export function adjustCoins(data: AppData, profileId: string, delta: number, note: string, now: number): ShopResult {
+  const p0 = getProfile(data, profileId)
+  if (!p0) return failShop(data, 'no-profile')
+  if (!Number.isFinite(delta) || Math.trunc(delta) === 0 || Math.abs(delta) > MAX_COIN_ADJUST) return failShop(data, 'invalid')
+  const d = Math.trunc(delta)
+  const text = typeof note === 'string' && note.trim() ? note.trim().slice(0, 80) : d > 0 ? 'Gift from a parent' : 'Removed by a parent'
+  const p = addCoins(p0, d, `${d > 0 ? '🎁' : '➖'} ${text}`, now, true)
+  return { data: withProfile(data, p), ok: true, newAchievements: [], levelUp: levelUpBetween(p0.xp, p.xp) }
+}
+
+export function cleanName(name: unknown): string | null {
+  if (typeof name !== 'string') return null
+  const n = name.replace(/\s+/g, ' ').trim()
+  if (n.length < 1 || n.length > 20) return null
+  return n
+}
+
+export function renameProfile(data: AppData, profileId: string, name: string): OpResult {
+  const p = getProfile(data, profileId)
+  if (!p) return fail(data, 'no-profile')
+  const n = cleanName(name)
+  if (!n) return fail(data, 'invalid')
+  return { data: withProfile(data, { ...p, name: n }), ok: true }
+}
+
+/** Set a profile's avatar. Only avatars the profile owns (no free gifts via this path). */
+export function setAvatar(data: AppData, profileId: string, emoji: string): OpResult {
+  const p = getProfile(data, profileId)
+  if (!p) return fail(data, 'no-profile')
+  const item = findItem('avatar', emoji)
+  if (!item) return fail(data, 'unknown-item')
+  if (!p.owned.includes(item.id)) return fail(data, 'not-owned')
+  return { data: withProfile(data, { ...p, avatar: item.refId }), ok: true }
+}
+
+/** Wipe a profile's progress (keeps id, name and colour). */
+export function resetProfile(data: AppData, profileId: string, now: number): OpResult {
+  const p = getProfile(data, profileId)
+  if (!p) return fail(data, 'no-profile')
+  const seed = defaultSeedFor(p.id) ?? { id: p.id, name: p.name, avatar: '🦉', color: p.color }
+  const fresh = createProfile({ id: p.id, name: p.name, avatar: seed.avatar, color: p.color }, now)
+  return { data: withProfile(data, fresh), ok: true }
+}
+
+export function setInOrderIndex(data: AppData, profileId: string, key: string, idx: number): OpResult {
+  const p = getProfile(data, profileId)
+  if (!p) return fail(data, 'no-profile')
+  if (typeof key !== 'string' || !key || !Number.isFinite(idx)) return fail(data, 'invalid')
+  const v = Math.max(0, Math.floor(idx))
+  if (p.inOrderIndex[key] === v) return { data, ok: true }
+  return { data: withProfile(data, { ...p, inOrderIndex: { ...p.inOrderIndex, [key]: v } }), ok: true }
+}
+
+export function setProfileSetting<K extends keyof ProfileSettings>(
+  data: AppData,
+  profileId: string,
+  key: K,
+  value: ProfileSettings[K],
+): OpResult {
+  const p = getProfile(data, profileId)
+  if (!p) return fail(data, 'no-profile')
+  if ((key !== 'sound' && key !== 'learnMode') || typeof value !== 'boolean') return fail(data, 'invalid')
+  if (p.settings[key] === value) return { data, ok: true }
+  return { data: withProfile(data, { ...p, settings: { ...p.settings, [key]: value } }), ok: true }
+}
+
+export function selectProfile(data: AppData, profileId: string | null, now: number): AppData {
+  if (profileId === null) return data.activeProfileId === null ? data : { ...data, activeProfileId: null }
+  const p = getProfile(data, profileId)
+  if (!p) return data
+  const d = withProfile(data, ensureDaily(p, now))
+  return d.activeProfileId === profileId ? d : { ...d, activeProfileId: profileId }
+}
+
+// ---------------------------------------------------------------------------
+// Parent: PIN & settings
+// ---------------------------------------------------------------------------
+
+export const PIN_RE = /^\d{4}$/
+
+/** Constant-shape comparison: always walks all 4 positions, no early exit. */
+export function pinMatches(stored: string | null, attempt: unknown): boolean {
+  const s = typeof stored === 'string' ? stored : ''
+  const a = typeof attempt === 'string' ? attempt : ''
+  let diff = (s.length === 4 ? 0 : 1) | (a.length === 4 ? 0 : 1)
+  for (let i = 0; i < 4; i++) diff |= (s.charCodeAt(i) || 0) ^ (a.charCodeAt(i) || 0)
+  return diff === 0
+}
+
+export function isValidPin(pin: unknown): pin is string {
+  return typeof pin === 'string' && PIN_RE.test(pin)
+}
+
+export function setPin(data: AppData, pin: string): OpResult {
+  if (!isValidPin(pin)) return fail(data, 'invalid')
+  return { data: withParent(data, { pin }), ok: true }
+}
+
+function cleanReward(raw: Partial<RewardDef>, id: string): RewardDef | null {
+  const name = typeof raw.name === 'string' ? raw.name.replace(/\s+/g, ' ').trim().slice(0, 40) : ''
+  const emoji = typeof raw.emoji === 'string' && raw.emoji.trim() ? raw.emoji.trim().slice(0, 8) : '🎁'
+  const cost = typeof raw.cost === 'number' && Number.isFinite(raw.cost) ? Math.floor(raw.cost) : NaN
+  if (!name || !(cost >= 1 && cost <= 1000000)) return null
+  let maxPerWeek: number | undefined
+  if (raw.maxPerWeek !== undefined && raw.maxPerWeek !== null) {
+    const m = Number(raw.maxPerWeek)
+    if (!Number.isFinite(m) || m < 1 || m > 100) return null
+    maxPerWeek = Math.floor(m)
+  }
+  const out: RewardDef = { id, name, emoji, cost, enabled: raw.enabled !== false }
+  if (maxPerWeek !== undefined) out.maxPerWeek = maxPerWeek
+  return out
+}
+
+/** Update an existing reward (matched by id). `maxPerWeek: undefined` = unlimited. */
+export function setReward(data: AppData, reward: RewardDef): OpResult {
+  const i = data.parent.rewards.findIndex((r) => r.id === reward?.id)
+  if (i < 0) return fail(data, 'unknown-reward')
+  const clean = cleanReward(reward, reward.id)
+  if (!clean) return fail(data, 'invalid')
+  const rewards = data.parent.rewards.slice()
+  rewards[i] = clean
+  return { data: withParent(data, { rewards }), ok: true }
+}
+
+function slug(s: string): string {
+  const base = s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24)
+  return base || 'reward'
+}
+
+export function addReward(data: AppData, reward: Omit<RewardDef, 'id'> & { id?: string }): OpResult & { id?: string } {
+  const taken = new Set(data.parent.rewards.map((r) => r.id))
+  const base = slug(reward?.id || reward?.name || '')
+  let id = base
+  for (let n = 2; taken.has(id); n++) id = `${base}-${n}`
+  const clean = cleanReward(reward ?? {}, id)
+  if (!clean) return fail(data, 'invalid')
+  return { data: withParent(data, { rewards: [...data.parent.rewards, clean] }), ok: true, id }
+}
+
+/** Remove a reward. Existing requests keep their snapshot (name/cost) and can still be resolved. */
+export function removeReward(data: AppData, rewardId: string): OpResult {
+  if (!data.parent.rewards.some((r) => r.id === rewardId)) return fail(data, 'unknown-reward')
+  return { data: withParent(data, { rewards: data.parent.rewards.filter((r) => r.id !== rewardId) }), ok: true }
+}
+
+export function setMaxPly(data: AppData, openingId: string, ply: number): OpResult {
+  if (typeof openingId !== 'string' || !openingId || !Number.isFinite(ply) || ply < 0 || ply > 400) return fail(data, 'invalid')
+  return { data: withParent(data, { maxPly: { ...data.parent.maxPly, [openingId]: Math.floor(ply) } }), ok: true }
+}
+
+export function toggleExtra(data: AppData, chapterId: string, on?: boolean): OpResult {
+  if (typeof chapterId !== 'string' || !chapterId) return fail(data, 'invalid')
+  const has = data.parent.enabledExtras.includes(chapterId)
+  const want = on === undefined ? !has : on
+  if (want === has) return { data, ok: true }
+  const enabledExtras = want ? [...data.parent.enabledExtras, chapterId] : data.parent.enabledExtras.filter((c) => c !== chapterId)
+  return { data: withParent(data, { enabledExtras }), ok: true }
+}
+
+export function setDailyGoal(data: AppData, n: number): OpResult {
+  if (!Number.isFinite(n) || n < 1 || n > 50) return fail(data, 'invalid')
+  return { data: withParent(data, { dailyGoalLines: Math.floor(n) }), ok: true }
+}
+
+export const MAX_STUDY_PGN_CHARS = 4_000_000
+
+export function importStudyPgn(data: AppData, text: string, name: string, now: number): OpResult {
+  if (typeof text !== 'string') return fail(data, 'invalid')
+  const pgn = text.replace(/^﻿/, '')
+  if (!pgn.trim() || pgn.length > MAX_STUDY_PGN_CHARS || !/\[\w+\s+"/.test(pgn)) return fail(data, 'invalid')
+  const label = typeof name === 'string' && name.trim() ? name.trim().slice(0, 80) : 'Imported study'
+  return { data: { ...data, studyOverride: { pgn, importedAt: now, name: label } }, ok: true }
+}
+
+export function clearStudyOverride(data: AppData): AppData {
+  if (data.studyOverride === undefined) return data
+  const { studyOverride: _drop, ...rest } = data
+  return rest
+}

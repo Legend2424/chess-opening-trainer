@@ -61,6 +61,10 @@ export class Engine {
   private evalQueue: Promise<Score | null> = Promise.resolve(null)
   private strength: StrengthSettings = { rating: 1200, moveTimeMs: 3000 }
   private playDepth = 10
+  /** Searches started (`go`) whose `bestmove` hasn't arrived yet. */
+  private pendingSearches = 0
+  /** bestmove replies still due from searches cancelled by stop(); they must not answer newer queries. */
+  private staleBestmoves = 0
 
   /** Load the wasm engine and complete the UCI handshake. */
   async init(): Promise<void> {
@@ -107,6 +111,11 @@ export class Engine {
     }
 
     if (line.startsWith('bestmove')) {
+      if (this.pendingSearches > 0) this.pendingSearches--
+      if (this.staleBestmoves > 0) {
+        this.staleBestmoves--
+        return
+      }
       const uciMove = line.split(/\s+/)[1]
       if (this.onBestQuery) {
         const cb = this.onBestQuery
@@ -156,13 +165,24 @@ export class Engine {
     this.send('ucinewgame')
   }
 
+  /** Full strength (Skill Level 20) — use before analysis on an engine that also plays. */
+  setFullStrength() {
+    this.send('setoption name UCI_LimitStrength value false')
+    this.send('setoption name Skill Level value 20')
+  }
+
+  private startSearch(goCmd: string) {
+    this.pendingSearches++
+    this.send(goCmd)
+  }
+
   /** Ask for a move from the given FEN. Calls back with a UCI move string. */
   go(fen: string, cb: BestMoveCallback) {
     this.onBestMove = cb
     this.send(`position fen ${fen}`)
     // Depth drives strength; movetime is a safety cap so strong levels in a
     // complex position still answer promptly. Whichever is reached first wins.
-    this.send(`go depth ${this.playDepth} movetime ${this.strength.moveTimeMs}`)
+    this.startSearch(`go depth ${this.playDepth} movetime ${this.strength.moveTimeMs}`)
   }
 
   /**
@@ -177,7 +197,7 @@ export class Engine {
         this.onEval = resolve
         this.lastScore = null
         this.send(`position fen ${fen}`)
-        this.send(`go depth ${depth}`)
+        this.startSearch(`go depth ${depth}`)
       })
     this.evalQueue = this.evalQueue.then(task, task)
     return this.evalQueue
@@ -193,18 +213,28 @@ export class Engine {
       new Promise<string | null>((resolve) => {
         this.onBestQuery = resolve
         this.send(`position fen ${fen}`)
-        this.send(`go depth ${depth}`)
+        this.startSearch(`go depth ${depth}`)
       })
     this.evalQueue = this.evalQueue.then(task, task) as Promise<Score | null>
     return this.evalQueue as unknown as Promise<string | null>
   }
 
-  /** Stop the current search (e.g. when the position changes mid-think). */
+  /**
+   * Stop the current search (e.g. when the position changes mid-think).
+   * Pending evaluate()/bestMoveAtDepth() promises resolve with null so the
+   * queue keeps flowing, and the cancelled search's late `bestmove` is ignored
+   * instead of answering the next query.
+   */
   stop() {
+    const evalCb = this.onEval
+    const bestCb = this.onBestQuery
     this.onBestMove = null
     this.onEval = null
     this.onBestQuery = null
-    this.send('stop')
+    this.staleBestmoves = this.pendingSearches
+    if (this.pendingSearches > 0) this.send('stop')
+    evalCb?.(null)
+    bestCb?.(null)
   }
 
   dispose() {

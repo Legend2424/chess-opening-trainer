@@ -193,8 +193,12 @@ known-bad, other-line and random-mode book-alt cases.
   - Line was due (seen before, dueAt ≤ now) and perfect: **+5** 🧠 "Remembered it!"
   - Combo ≥ 3 (consecutive perfect lines this session): **+5** 🔥 "Combo xN" (≥ 6: +10)
   - Opponent blunder punished (perfect line with an opponent ?/?? move): **+5** ⚔️
-  - Daily goal reached by this line (lines today == dailyGoalLines): **+30** 🎯, plus streak bonus
+  - Daily goal reached by this line (distinct lines today == dailyGoalLines): **+30** 🎯, plus streak bonus
     `5 * min(streakDays, 7)` 📅
+  - **Anti-farming**: if this same line was completed less than 60 minutes ago (lineStats.lastPracticed)
+    and it was not due, award a flat **2** 🪙 "Practice makes perfect" and no other bonuses; it still
+    updates line stats. The daily goal counts **distinct** lines per day (add optional
+    `distinctLineIds?: string[]` to `DailyState` if you need it — optional field only).
 - `achievements.ts`: `ACHIEVEMENTS: AchievementDef[]` + `checkAchievements(profile, ctx): AchievementDef[]`
   (newly unlocked only). At least: first line, first perfect, 10/50/100 perfect, 10/50/200/500 lines,
   combo 5 / combo 10, 3/7/30-day streak, punish a blunder, master a whole chapter, master a whole
