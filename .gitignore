@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+_*.txt
+*.tsbuildinfo
+
+# raw Lichess exports (private study) — only the extracted file in public/ is shipped
+data/
