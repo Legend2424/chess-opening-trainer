@@ -2,7 +2,7 @@
 // Plain node + node:assert. Builds fake Line/Repertoire objects (no PGN parser needed).
 
 import assert from 'node:assert/strict'
-import type { AppData, Line, LineStats, Profile, Repertoire } from '../src/types.ts'
+import type { AppData, Line, LineStats, ParentSettings, Profile, Repertoire } from '../src/types.ts'
 import { BOARD_THEME_IDS, EFFECT_IDS, PIECE_SET_IDS } from '../src/types.ts'
 import { OPENINGS } from '../src/data/openings.ts'
 import { CATALOG, FREE_ITEM_IDS, itemById } from '../src/store/catalog.ts'
@@ -94,6 +94,9 @@ function prof(data: AppData, id = 'david'): Profile {
 function patchProfile(data: AppData, id: string, patch: Partial<Profile>): AppData {
   return ops.withProfile(data, { ...prof(data, id), ...patch })
 }
+
+/** A minimal study PGN with one of the coach's chapters (Open Sicilian). */
+const STUDY_V2 = '[Event "x"]\n[ChapterURL "https://lichess.org/study/CZiXOjIp/hF97JQsY"]\n\n1. e4 *'
 
 function sum(b: { coins: number }[]): number {
   return b.reduce((s, x) => s + x.coins, 0)
@@ -255,15 +258,16 @@ await test('rewards: combo and punished blunder need a perfect line', () => {
   const line = fakeLine('a', 4)
   const p = { ...prof(fresh()), lineStats: { a: stats({ dueAt: NOW + DAY, lastPracticed: NOW - 2 * DAY }) } }
   const c = (combo: number, mistakes = 0) =>
-    computeLineReward(input(line, { combo, mistakes }), p, 5).breakdown.find((b) => b.emoji === '🔥')?.coins ?? 0
+    computeLineReward(input(line, { combo, mistakes }), p, 5).breakdown.find((b) => b.label.startsWith('Combo'))?.coins ?? 0
   assert.equal(c(2), 0)
   assert.equal(c(3), 5)
   assert.equal(c(5), 5)
   assert.equal(c(6), 10)
   assert.equal(c(9), 10)
   assert.equal(c(6, 1), 0)
-  const label = computeLineReward(input(line, { combo: 4 }), p, 5).breakdown.find((b) => b.emoji === '🔥')!.label
-  assert.equal(label, 'Combo x4')
+  const combo4 = computeLineReward(input(line, { combo: 4 }), p, 5).breakdown.find((b) => b.label.startsWith('Combo'))!
+  assert.equal(combo4.label, 'Combo x4')
+  assert.equal(combo4.emoji, '⚡') // 🔥 is the daily streak's icon
   const bl = computeLineReward(input(line, { opponentBlunderPunished: true }), p, 5)
   assert.ok(bl.breakdown.some((b) => b.label === 'Punished a blunder' && b.coins === 5))
   assert.equal(bl.punishedBlunder, true)
@@ -326,6 +330,134 @@ await test('rewards: anti-farming (same line < 60 min, not due) = flat 2, no bon
   assert.ok(later.coins > 2)
   // Clock moved backwards → still treated as "just practised".
   assert.equal(computeLineReward(input(line, { now: NOW - 2 * HOUR }), p, 5).farmed, true)
+})
+
+/** Coins from the line itself (achievement chips left out). */
+function lineCoins(r: { reward: { breakdown: { label: string; coins: number }[] } }): number {
+  return sum(r.reward.breakdown.filter((b) => !b.label.startsWith('🏅')))
+}
+const MIN = 60_000
+
+await test('anti-farming: perfect → fail → perfect on repeat no longer pays in full (review: kid #1)', () => {
+  const line = fakeLine('loop', 10)
+  for (const fail of [{ mistakes: 2 }, { usedArrowHint: true, hintsUsed: 2 }]) {
+    let d = fresh()
+    const r1 = ops.applyLineResult(d, 'david', input(line, { now: NOW }), null)
+    assert.equal(r1.farmed, false)
+    d = r1.data
+    const r2 = ops.applyLineResult(d, 'david', input(line, { now: NOW + 2 * MIN, ...fail }), null)
+    assert.equal(r2.farmed, true)
+    assert.equal(lineCoins(r2), 2)
+    // The farmed failure lowered the box but did NOT make the line due now.
+    assert.equal(prof(r2.data).lineStats.loop.box, 0)
+    assert.ok(prof(r2.data).lineStats.loop.dueAt > NOW + 2 * MIN)
+    const r3 = ops.applyLineResult(r2.data, 'david', input(line, { now: NOW + 4 * MIN }), null)
+    assert.equal(r3.farmed, true, JSON.stringify(fail))
+    assert.equal(lineCoins(r3), 2)
+  }
+})
+
+await test('anti-farming: failing on purpose again and again pays 2 after the one quick retry', () => {
+  const line = fakeLine('fail', 10)
+  const f1 = ops.applyLineResult(fresh(), 'david', input(line, { now: NOW, mistakes: 2 }), null) // new line: full pay
+  assert.equal(f1.farmed, false)
+  const f2 = ops.applyLineResult(f1.data, 'david', input(line, { now: NOW + 2 * MIN, mistakes: 2 }), null) // the quick retry
+  assert.equal(f2.farmed, false)
+  assert.ok(lineCoins(f2) > 2)
+  const f3 = ops.applyLineResult(f2.data, 'david', input(line, { now: NOW + 4 * MIN, mistakes: 2 }), null)
+  assert.equal(f3.farmed, true)
+  assert.equal(lineCoins(f3), 2)
+  const f4 = ops.applyLineResult(f3.data, 'david', input(line, { now: NOW + 6 * MIN }), null)
+  assert.equal(f4.farmed, true)
+  // After a real break the line pays normally again (and the retry pass resets).
+  const later = ops.applyLineResult(f4.data, 'david', input(line, { now: NOW + 70 * MIN }), null)
+  assert.equal(later.farmed, false)
+  assert.ok(lineCoins(later) > 2)
+  assert.equal(prof(later.data).lineStats.fail.quickRetryUsed, undefined)
+  // The legitimate fail → fix right away still pays in full (DESIGN §3).
+  const a1 = ops.applyLineResult(fresh(), 'david', input(line, { now: NOW, mistakes: 2 }), null)
+  const a2 = ops.applyLineResult(a1.data, 'david', input(line, { now: NOW + 3 * MIN }), null)
+  assert.equal(a2.farmed, false)
+  assert.ok(a2.reward.breakdown.some((b) => b.label === 'Perfect!'))
+})
+
+await test('learn mode: the next run without arrows pays in full once, incl. "New line" (review: kid #2, #3)', () => {
+  const line = fakeLine('learn', 10)
+  const l1 = ops.applyLineResult(fresh(), 'david', input(line, { now: NOW, learnMode: true }), null)
+  assert.deepEqual(l1.reward.breakdown.filter((b) => !b.label.startsWith('🏅')).map((b) => b.label), ['Learned a line'])
+  assert.equal(prof(l1.data).lineStats.learn.learnPending, true)
+  assert.equal(prof(l1.data).lineStats.learn.learnCompletions, 1)
+  const n1 = ops.applyLineResult(l1.data, 'david', input(line, { now: NOW + 2 * MIN }), null)
+  assert.equal(n1.farmed, false)
+  assert.deepEqual(
+    n1.reward.breakdown.filter((b) => !b.label.startsWith('🏅')).map((b) => b.label),
+    ['Line complete', 'Perfect!', 'New line'],
+  )
+  assert.equal(prof(n1.data).lineStats.learn.learnPending, undefined)
+  // ...but only once.
+  const n2 = ops.applyLineResult(n1.data, 'david', input(line, { now: NOW + 4 * MIN }), null)
+  assert.equal(n2.farmed, true)
+  // Learn twice in a row (2nd is farmed): the promise still holds once.
+  const a = ops.applyLineResult(fresh(), 'david', input(line, { now: NOW, learnMode: true }), null)
+  const b = ops.applyLineResult(a.data, 'david', input(line, { now: NOW + MIN, learnMode: true }), null)
+  assert.equal(b.farmed, true)
+  const c = ops.applyLineResult(b.data, 'david', input(line, { now: NOW + 2 * MIN }), null)
+  assert.equal(c.farmed, false)
+  // The one free run can't start a loop: failing it keeps the review tomorrow.
+  const x = ops.applyLineResult(fresh(), 'david', input(line, { now: NOW, learnMode: true }), null)
+  const y = ops.applyLineResult(x.data, 'david', input(line, { now: NOW + MIN, mistakes: 3 }), null)
+  assert.equal(y.farmed, false)
+  assert.ok(prof(y.data).lineStats.learn.dueAt > NOW + HOUR)
+  const z = ops.applyLineResult(y.data, 'david', input(line, { now: NOW + 2 * MIN, learnMode: true }), null)
+  assert.equal(z.farmed, true)
+  const w = ops.applyLineResult(z.data, 'david', input(line, { now: NOW + 3 * MIN }), null)
+  assert.equal(w.farmed, true)
+})
+
+await test('learn mode: arrows on every move pays like learn mode, not like a new line (review: kid #3)', () => {
+  const line = fakeLine('arrows', 10)
+  const p = prof(fresh())
+  const heavy = computeLineReward(input(line, { usedArrowHint: true, hintsUsed: 20 }), p, 5)
+  assert.equal(heavy.learnLike, true)
+  assert.deepEqual(heavy.breakdown.map((b) => [b.label, b.coins]), [['Learned a line', 8]])
+  const learn = computeLineReward(input(line, { learnMode: true }), p, 5)
+  assert.ok(heavy.coins <= learn.coins)
+  // One arrow on a long line is a normal (non-perfect) run.
+  const light = computeLineReward(input(line, { usedArrowHint: true, hintsUsed: 2 }), p, 5)
+  assert.equal(light.learnLike, false)
+  assert.deepEqual(light.breakdown.map((b) => b.label), ['Line complete', 'New line'])
+  // A learn-mode completion doesn't use up "New line": the next day's first real run gets it.
+  const d1 = ops.applyLineResult(fresh(), 'david', input(line, { now: NOW, learnMode: true }), null).data
+  const next = ops.applyLineResult(d1, 'david', input(line, { now: NOW + DAY }), null)
+  assert.ok(next.reward.breakdown.some((b) => b.label === 'New line'))
+  const after = ops.applyLineResult(next.data, 'david', input(line, { now: NOW + 3 * DAY }), null)
+  assert.ok(!after.reward.breakdown.some((b) => b.label === 'New line'))
+})
+
+await test('daily goal: lowering the goal does not show it as met until it is claimed (review: code #7)', () => {
+  let d = fresh()
+  for (let i = 0; i < 4; i++) d = ops.applyLineResult(d, 'david', input(fakeLine(`g${i}`, 4), { now: NOW + i * MIN }), null).data
+  assert.deepEqual(ops.dailyGoalProgress(prof(d), NOW + 5 * MIN, 5), { done: 4, goal: 5, met: false })
+  d = ops.setDailyGoal(d, 3).data
+  assert.deepEqual(ops.dailyGoalProgress(prof(d), NOW + 5 * MIN, d.parent.dailyGoalLines), { done: 4, goal: 3, met: false })
+  const r = ops.applyLineResult(d, 'david', input(fakeLine('g9', 4), { now: NOW + 6 * MIN }), null)
+  assert.equal(r.reward.dailyGoalJustMet, true)
+  assert.equal(ops.dailyGoalProgress(prof(r.data), NOW + 7 * MIN, 3).met, true)
+})
+
+await test('storage keeps the learn/retry markers on line stats', () => {
+  const d = patchProfile(fresh(), 'david', {
+    lineStats: { a: stats({ completions: 2, learnCompletions: 5, learnPending: true, quickRetryUsed: true }), b: stats({}) },
+  })
+  const v = storage.validateAppData(JSON.parse(JSON.stringify(d)), NOW)
+  assert.ok(v.ok)
+  if (!v.ok) return
+  const a = prof(v.data).lineStats.a
+  assert.deepEqual([a.learnCompletions, a.learnPending, a.quickRetryUsed], [2, true, true]) // capped at completions
+  assert.deepEqual(
+    Object.keys(prof(v.data).lineStats.b).sort(),
+    ['attempts', 'box', 'completions', 'dueAt', 'lastMistakes', 'lastPracticed', 'perfects'],
+  )
 })
 
 await test('rewards: engine game coins', () => {
@@ -937,7 +1069,10 @@ await test('parent: settings ops validate input', () => {
   assert.equal(prof(reset.data).coins, 0)
   assert.deepEqual(prof(reset.data).lineStats, {})
   assert.equal(ops.importStudyPgn(d, 'hello', 'x', NOW).ok, false)
-  const imp = ops.importStudyPgn(d, '[Event "x"]\n\n1. e4 *', 'Study v2', NOW)
+  // A PGN without any of the coach's chapters is refused (review: parent #3): every opening would have 0 lines.
+  const noCh = ops.importStudyPgn(d, '[Event "x"]\n\n1. e4 *', 'Study v2', NOW)
+  assert.deepEqual([noCh.ok, noCh.error], [false, 'no-chapters'])
+  const imp = ops.importStudyPgn(d, STUDY_V2, 'Study v2', NOW)
   assert.ok(imp.ok)
   assert.equal(imp.data.studyOverride!.name, 'Study v2')
   assert.equal(ops.clearStudyOverride(imp.data).studyOverride, undefined)
@@ -973,7 +1108,7 @@ await test('storage: save/load round trip, study stored separately, corrupt data
   const mem = new MemStorage()
   storage.setStorageBackend(mem)
   let d = ops.applyLineResult(fresh(), 'david', input(fakeLine('a', 4)), null).data
-  d = ops.importStudyPgn(d, '[Event "x"]\n\n1. e4 *', 'Study v2', NOW).data
+  d = ops.importStudyPgn(d, STUDY_V2, 'Study v2', NOW).data
   assert.equal(storage.saveAppData(d), true)
   assert.ok(mem.getItem(storage.STORAGE_KEY))
   assert.ok(!mem.getItem(storage.STORAGE_KEY)!.includes('1. e4 *'))
@@ -1237,6 +1372,168 @@ await test('appStore: actions work without a DOM; PIN flow; import is all-or-not
   assert.equal(getActiveProfile(), null)
   assert.equal(actions.isParentUnlocked(), false)
   unsub()
+  storage.setStorageBackend(undefined)
+})
+
+await test('parent ops: undo approve, undo gift, gifts that do not level up, unique names (review: parent #10, #12, #14)', () => {
+  let d = patchProfile(fresh(), 'david', { coins: 2000 })
+  const req = ops.requestRedemption(d, 'david', 'pokemon-pack', NOW)
+  assert.ok(req.ok)
+  const id = req.redemption!.id
+  const ap = ops.resolveRedemption(req.data, 'david', id, true, NOW + 1000)
+  assert.ok(ap.ok)
+  const un = ops.unresolveRedemption(ap.data, 'david', id, NOW + 5000)
+  assert.ok(un.ok)
+  const back = prof(un.data).redemptions.find((r) => r.id === id)!
+  assert.deepEqual([back.status, back.resolvedAt], ['pending', undefined])
+  assert.equal(ops.unresolveRedemption(ap.data, 'david', id, NOW + 1000 + ops.UNDO_APPROVE_MS + 1).error, 'too-late')
+  assert.equal(ops.unresolveRedemption(req.data, 'david', id, NOW + 2000).error, 'not-pending')
+  // A 600-coin gift levels a new player up; "Undo" takes the coins AND the XP back.
+  d = fresh()
+  const g = ops.adjustCoins(d, 'minka', 600, '', NOW)
+  assert.ok(g.levelUp)
+  const u = ops.undoGift(g.data, 'minka', 600, NOW + 1)
+  assert.deepEqual([prof(u.data, 'minka').coins, prof(u.data, 'minka').xp], [0, 0])
+  // Giving back coins removed by mistake doesn't count toward the level.
+  const rm = ops.adjustCoins(g.data, 'minka', -600, '', NOW + 2)
+  const giveBack = ops.adjustCoins(rm.data, 'minka', 600, 'undo', NOW + 3, false)
+  assert.deepEqual([prof(giveBack.data, 'minka').coins, prof(giveBack.data, 'minka').xp], [600, 600])
+  // Names must be unique (any case); re-casing your own name is fine.
+  const taken = ops.renameProfile(d, 'david', 'MINKA')
+  assert.deepEqual([taken.ok, taken.error], [false, 'name-taken'])
+  assert.equal(prof(ops.renameProfile(d, 'david', 'DAVID').data).name, 'DAVID')
+  assert.equal(ops.renameProfile(d, 'david', '  ').message, 'Names need 1–20 letters.')
+})
+
+await test('parent ops: PIN resets are recorded, merged on import and pause approvals/gifts after a fallback reset (review: parent #1, #2, #11)', () => {
+  let d = fresh()
+  d = ops.setPin(d, '1234').data
+  const r1 = ops.resetPin(d, '5555', NOW)
+  const r2 = ops.resetPin(r1.data, '6666', NOW + HOUR, { fallback: true })
+  assert.deepEqual(ops.pinResetTimes(r2.data.parent), [NOW, NOW + HOUR])
+  assert.equal(ops.latestPinReset(r2.data.parent), NOW + HOUR)
+  // Paused for 24 h: approving and gifting; declining and removing still work.
+  d = patchProfile(r2.data, 'david', { coins: 2000 })
+  const req = ops.requestRedemption(d, 'david', 'pokemon-pack', NOW + HOUR)
+  assert.equal(ops.resolveRedemption(req.data, 'david', req.redemption!.id, true, NOW + 2 * HOUR).error, 'reset-cooldown')
+  assert.ok(ops.resolveRedemption(req.data, 'david', req.redemption!.id, false, NOW + 2 * HOUR).ok)
+  assert.equal(ops.adjustCoins(d, 'david', 10, '', NOW + 2 * HOUR).error, 'reset-cooldown')
+  assert.ok(ops.adjustCoins(d, 'david', -10, '', NOW + 2 * HOUR).ok)
+  assert.ok(ops.resolveRedemption(req.data, 'david', req.redemption!.id, true, NOW + HOUR + DAY + 1).ok)
+  // Importing an OLD backup (no reset records, a PIN, a recovery hash, an ack) can't hide the reset or replace the PIN.
+  const old: ParentSettings = { ...fresh().parent, pin: '0000', recoveryHash: 'abcdefgh12', pinResetAckAt: NOW + 10 * DAY, pinResetRequestedAt: 1 }
+  const cur = { ...r2.data.parent, recoveryHash: ops.hashRecoveryCode('ABCD-EFGH-JKLM') }
+  const m = ops.mergeParentOnImport(cur, old)
+  assert.equal(m.pin, '6666')
+  assert.equal(m.recoveryHash, cur.recoveryHash)
+  assert.deepEqual(ops.pinResetTimes(m), [NOW, NOW + HOUR])
+  assert.equal(m.pinFallbackResetAt, NOW + HOUR)
+  assert.equal(m.pinResetAckAt, undefined)
+  assert.equal(m.pinResetRequestedAt, undefined)
+  // A device without a PIN takes the file's.
+  assert.equal(ops.mergeParentOnImport(fresh().parent, old).pin, '0000')
+})
+
+await test('parent ops: forgot-PIN wait, recovery code, clock jumps (review: parent #1, #9)', () => {
+  let d = fresh()
+  const q = ops.requestPinReset(d, NOW)
+  assert.equal(ops.pinResetReadyAt(q.data.parent), NOW + DAY)
+  // Asking again doesn't restart the wait; the parent can cancel it.
+  assert.equal(ops.requestPinReset(q.data, NOW + HOUR).data, q.data)
+  assert.equal(ops.pinResetReadyAt(ops.cancelPinResetRequest(q.data).data.parent), null)
+  // A reset clears the request.
+  assert.equal(ops.resetPin(q.data, '1357', NOW + DAY, { fallback: true }).data.parent.pinResetRequestedAt, undefined)
+  // Recovery code: case / dashes don't matter; too short never matches.
+  d = ops.setRecoveryHash(d, ops.hashRecoveryCode('ab12-cd34')).data
+  assert.ok(ops.recoveryCodeMatches(d.parent, 'AB12CD34'))
+  assert.ok(ops.recoveryCodeMatches(d.parent, ' ab12 cd34 '))
+  assert.ok(!ops.recoveryCodeMatches(d.parent, 'AB12CD35'))
+  assert.equal(ops.setRecoveryHash(d, 'x').ok, false)
+  // Backups never carry the recovery hash (nor the PIN).
+  const backup = JSON.parse(storage.exportBackup(ops.setPin(d, '2468').data, NOW))
+  assert.equal(backup.data.parent.recoveryHash, undefined)
+  assert.equal(backup.data.parent.pin, null)
+  // Clock: moving it back over an hour is recorded; forward (or staying) isn't.
+  let c = ops.trackClock(fresh(), NOW)
+  assert.equal(c.parent.lastSeenAt, NOW)
+  assert.equal(ops.trackClock(c, NOW + 5 * 60000), c) // nothing to write
+  c = ops.trackClock(c, NOW + 3 * DAY)
+  assert.equal(c.parent.clockJumps, undefined)
+  c = ops.trackClock(c, NOW)
+  assert.deepEqual(c.parent.clockJumps, [{ from: NOW + 3 * DAY, to: NOW }])
+  assert.equal(ops.trackClock(c, NOW + 60000), c) // no new jump every minute
+  const v = storage.validateAppData(JSON.parse(JSON.stringify(c)), NOW)
+  assert.ok(v.ok && v.data.parent.clockJumps?.length === 1)
+  assert.equal(ops.clearClockJumps(c).parent.clockJumps, undefined)
+})
+
+await test('storage.importBackup (no live store) keeps the saved PIN even if the file has one (review: parent #11)', () => {
+  const mem = new MemStorage()
+  storage.setStorageBackend(mem)
+  storage.registerLiveStore(null) // the storage-only path (an earlier test registered a live store)
+  const mine = ops.setPin(fresh(), '4321').data
+  mem.setItem(storage.STORAGE_KEY, JSON.stringify(mine))
+  const crafted = JSON.stringify({ ...fresh(), parent: { ...fresh().parent, pin: '9999' } })
+  assert.ok(storage.importBackup(crafted).ok)
+  assert.equal(JSON.parse(mem.getItem(storage.STORAGE_KEY)!).parent.pin, '4321')
+  storage.setStorageBackend(undefined)
+})
+
+await test('appStore: PIN lockout survives a reload; grown-up check backs off; forgot-PIN paths; undo restore (review: parent #1, #5, #11)', async () => {
+  const mem = new MemStorage()
+  storage.setStorageBackend(mem)
+  const a = await freshAppStore('pinlock-a')
+  assert.ok(a.actions.setPin('2468').ok)
+  a.actions.lockParent()
+  for (let i = 0; i < 5; i++) assert.equal(a.actions.verifyPin('0000'), false)
+  assert.ok(a.actions.pinLockoutMs() > 0)
+  storage.flushSave()
+  // "Reload": a fresh store on the same storage still knows about the lockout.
+  const b = await freshAppStore('pinlock-b')
+  assert.ok(b.actions.pinLockoutMs() > 0)
+  assert.equal(b.actions.verifyPin('2468'), false)
+  // Grown-up question: two wrong answers, then a wait.
+  assert.equal(b.actions.adultCheckLockoutMs(), 0)
+  b.actions.adultCheckAnswered(false)
+  assert.equal(b.actions.adultCheckLockoutMs(), 0)
+  b.actions.adultCheckAnswered(false)
+  assert.ok(b.actions.adultCheckLockoutMs() > 25_000)
+  b.actions.adultCheckAnswered(true)
+  assert.equal(b.actions.adultCheckLockoutMs(), 0)
+  // Forgot the PIN without a code: a request first, the new PIN only after 24 h.
+  assert.equal(b.actions.resetPinAfterWait('1111').ok, false)
+  const req = b.actions.requestPinReset()
+  assert.ok(req.ok && req.readyAt !== null && req.readyAt > Date.now() + 23 * HOUR)
+  assert.equal(b.actions.resetPinAfterWait('1111').ok, false)
+  // With the recovery code it works right away (and clears the lockout).
+  assert.equal(b.actions.hasRecoveryCode(), false)
+  mem.setItem('opening-quest.pinlock', JSON.stringify({ fails: 0, lockedUntil: 0 }))
+  assert.equal(b.actions.verifyPin('2468'), true) // parent session open → may set a code
+  assert.ok(b.actions.setRecoveryCode('K7PX-2MQR').ok)
+  b.actions.lockParent()
+  assert.equal(b.actions.resetPinWithCode('K7PX-2MQS', '1111').ok, false)
+  assert.ok(b.actions.resetPinWithCode('k7px2mqr', '1111').ok)
+  assert.equal(b.getAppData().parent.pin, '1111')
+  assert.equal(b.getAppData().parent.pinFallbackResetAt, undefined) // with the code: no pause
+  assert.equal(b.getAppData().parent.pinResetRequestedAt, undefined)
+  assert.equal(b.actions.pinLockoutMs(), 0)
+  // Undo restore: the data from just before the import comes back.
+  b.actions.selectProfile('david')
+  assert.ok(b.actions.adjustCoins('david', 77, 'x').ok)
+  const epoch0 = b.getStoreEpoch()
+  const other = JSON.stringify({ app: 'opening-quest', kind: 'backup', version: 1, exportedAt: 1, data: { ...fresh(), parent: { ...fresh().parent, pin: null } } })
+  assert.ok(b.actions.importBackup(other).ok)
+  assert.equal(b.getActiveProfile()!.coins, 0)
+  assert.ok(b.getStoreEpoch() > epoch0) // the trainer's session memory starts clean
+  assert.equal(b.getAppData().parent.pin, '1111') // device PIN kept
+  assert.ok(b.actions.hasRestoreUndo())
+  assert.ok(b.actions.undoRestore().ok)
+  assert.equal(b.getActiveProfile()!.coins, 77)
+  assert.equal(b.actions.hasRestoreUndo(), false)
+  // Resetting a player also starts the session memory clean.
+  const e1 = b.getStoreEpoch()
+  b.actions.resetProfile('david')
+  assert.ok(b.getStoreEpoch() > e1)
   storage.setStorageBackend(undefined)
 })
 

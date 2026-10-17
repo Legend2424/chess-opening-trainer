@@ -4,7 +4,7 @@
 // (DESIGN.md §1) — imported, not copied, so there is one source of truth.
 
 import type { LineResultInput, LineStats, Profile, RewardLine } from '../types.ts'
-import { BOX_INTERVAL_DAYS, DAY_MS, isMastered, updateLineStats } from '../chess/scheduler.ts'
+import { BOX_INTERVAL_DAYS, DAY_MS, isDueToday, isMastered, updateLineStats } from '../chess/scheduler.ts'
 import { addDaysToKey, emptyDaily, isDateKey, localDateKey, previousDateKey } from './defaults.ts'
 import type { DailyStateX } from './defaults.ts'
 
@@ -38,7 +38,7 @@ function boxOf(s: LineStats): number {
 export function canPromote(prev: LineStats | undefined, now: number): boolean {
   if (!prev || boxOf(prev) === 0) return true
   const due = typeof prev.dueAt === 'number' && Number.isFinite(prev.dueAt) ? prev.dueAt : 0
-  return due <= now || localDateKey(due) <= localDateKey(now)
+  return due <= now || isDueToday({ ...prev, dueAt: due }, now)
 }
 
 /**
@@ -162,8 +162,21 @@ export interface LineRewardResult {
   stars: 1 | 2 | 3
   /** 0 mistakes, 0 hints, not learn mode. */
   perfect: boolean
-  /** Same line completed < 60 min ago and not due → flat 2 coins, no bonuses. */
+  /**
+   * A learn-mode run: "Show me the moves" was on, or the arrow hint was used on
+   * about half the moves or more (each arrow costs 2 hints). Pays "Learned a
+   * line" (half the base) and never the "New line" bonus.
+   */
+  learnLike: boolean
+  /**
+   * Same line completed < 60 min ago and not due → flat 2 coins, no bonuses.
+   * Exception: the first normal run right after a paid learn-mode run.
+   */
   farmed: boolean
+  /** The free pass after a learn-mode run was used (see LineStats.learnPending). */
+  afterLearn: boolean
+  /** A quick retry of a line that is due only because the last run failed. */
+  retryOfFail: boolean
   isNewLine: boolean
   wasDue: boolean
   /** This completion adds a new distinct line to today's goal count. */
@@ -192,15 +205,25 @@ export function computeLineReward(input: LineResultInput, profile: Profile, dail
   const stars = starsFor(mistakes, hints, arrow)
   const clean = mistakes === 0 && hints === 0 && !arrow
   const perfect = clean && !learn
+  const learnLike = learn || (arrow && hints >= Math.max(1, nonNegInt(line.userMoveCount)))
 
   const seenBefore = !!prev && prev.lastPracticed > 0
+  // Exact timestamp on purpose (anti-farming): "due later today" is not due here.
   const wasDue = seenBefore && prev.dueAt <= now
-  const isNewLine = !prev || nonNegInt(prev.completions) === 0
+  // Learn-mode completions don't use up the "New line" bonus.
+  const isNewLine = !prev || nonNegInt(prev.completions) - nonNegInt(prev.learnCompletions) <= 0
   // A slightly negative elapsed time (clock moved back) also counts as "just
   // now"; a lastPracticed more than a day ahead is a wrong clock, not "recent".
   const elapsed = seenBefore ? now - prev.lastPracticed : Infinity
   const recentlyPracticed = seenBefore && elapsed < FARM_WINDOW_MS && elapsed > -CLOCK_SKEW_MS
-  const farmed = recentlyPracticed && !wasDue
+  // "Try it without the arrows" right after learning a line pays in full once.
+  const afterLearn = !!prev && prev.learnPending === true && !learnLike
+  // Due only because the last run failed (a failure sets the review to "now").
+  // Fixing it right away pays in full ONCE; failing again and again doesn't
+  // keep paying (else "make 2 mistakes every time" would beat playing well).
+  const justFailed = seenBefore && prev.dueAt <= prev.lastPracticed
+  const retryOfFail = recentlyPracticed && wasDue && justFailed
+  const farmed = recentlyPracticed && (!wasDue || (retryOfFail && prev.quickRetryUsed === true)) && !afterLearn
 
   const daily = effectiveDaily(profile, now)
   const ids = distinctLineIdsOf(daily)
@@ -217,20 +240,21 @@ export function computeLineReward(input: LineResultInput, profile: Profile, dail
     breakdown.push({ label: 'Practice makes perfect', coins: FARM_COINS, emoji: '🪙' })
   } else {
     const base = BASE_COINS + Math.min(nonNegInt(line.userMoveCount), MAX_MOVE_COINS)
-    if (learn) {
+    if (learnLike) {
       breakdown.push({ label: 'Learned a line', coins: Math.ceil(base / 2), emoji: '📖' })
     } else {
       breakdown.push({ label: 'Line complete', coins: base, emoji: '🪙' })
       if (perfect) breakdown.push({ label: 'Perfect!', coins: PERFECT_BONUS, emoji: '⭐' })
       if (isNewLine) breakdown.push({ label: 'New line', coins: NEW_LINE_BONUS, emoji: '✨' })
       // "Remembered" means recalled after a gap: a line re-done right after
-      // failing it is due again immediately, but that is not remembering.
-      if (wasDue && perfect && !recentlyPracticed) {
+      // failing it is due again immediately, but that is not remembering. Due
+      // later today counts (the review is today's).
+      if (seenBefore && isDueToday(prev, now) && perfect && !recentlyPracticed) {
         breakdown.push({ label: 'Remembered it!', coins: REMEMBERED_BONUS, emoji: '🧠' })
       }
       const combo = nonNegInt(input.combo)
       if (perfect && combo >= 3) {
-        breakdown.push({ label: `Combo x${combo}`, coins: combo >= 6 ? BIG_COMBO_BONUS : COMBO_BONUS, emoji: '🔥' })
+        breakdown.push({ label: `Combo x${combo}`, coins: combo >= 6 ? BIG_COMBO_BONUS : COMBO_BONUS, emoji: '⚡' })
       }
       if (perfect && input.opponentBlunderPunished) {
         punishedBlunder = true
@@ -253,7 +277,10 @@ export function computeLineReward(input: LineResultInput, profile: Profile, dail
     breakdown,
     stars,
     perfect,
+    learnLike,
     farmed,
+    afterLearn,
+    retryOfFail,
     isNewLine,
     wasDue,
     countsTowardGoal,

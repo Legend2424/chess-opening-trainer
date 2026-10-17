@@ -19,9 +19,25 @@ export function isMastered(s?: LineStats): boolean {
   return !!s && s.box >= 3
 }
 
-/** Unseen lines count as due. */
+/** Local midnight at the end of `now`'s day (epoch ms). */
+export function startOfNextLocalDay(now: number): number {
+  const d = new Date(now)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime()
+}
+
+/**
+ * Due for review TODAY (local calendar day): a line whose review time is later
+ * today already counts, so practising a bit earlier each day still finds that
+ * day's reviews. Unseen lines count as due. (The anti-farming rule in
+ * store/rewards.ts deliberately keeps using the exact timestamp.)
+ */
+export function isDueToday(s: LineStats | undefined, now: number): boolean {
+  return !s || !(s.dueAt >= startOfNextLocalDay(now))
+}
+
+/** Unseen lines count as due. Due = due today (see isDueToday). */
 export function isDue(s: LineStats | undefined, now: number): boolean {
-  return !s || s.dueAt <= now
+  return isDueToday(s, now)
 }
 
 function clampBox(b: number): number {
@@ -63,10 +79,13 @@ export function updateLineStats(prev: LineStats | undefined, r: LineResult, now:
   }
 }
 
-/** Selection weight: unseen 4 · overdue 3 + days overdue (capped at 10) · not due 0.3 / (box + 1). */
+/**
+ * Selection weight: unseen 4 · due today 3 + days overdue (min 3, capped at 10)
+ * · not due 0.3 / (box + 1).
+ */
 export function lineWeight(s: LineStats | undefined, now: number): number {
   if (!s) return 4
-  if (s.dueAt <= now) return Math.min(10, 3 + (now - s.dueAt) / DAY_MS)
+  if (isDueToday(s, now)) return Math.min(10, Math.max(3, 3 + (now - s.dueAt) / DAY_MS))
   return 0.3 / (clampBox(s.box) + 1)
 }
 
@@ -99,6 +118,50 @@ export function pickLine(
   return pool[pool.length - 1]
 }
 
+/**
+ * Like pickLine, but first picks a CHAPTER (weight = its most urgent line's
+ * weight), then a line inside it. A chapter with 80 lines would otherwise come
+ * up 80 times as often as one with 9 (Coach's Choice re-picks at every opponent
+ * move, so each branch's share follows its number of leaf lines).
+ */
+export function pickLineBalanced(
+  lines: Line[],
+  stats: Record<string, LineStats>,
+  now: number,
+  opts: { avoidLineId?: string; rng?: () => number } = {},
+): Line {
+  if (lines.length === 0) throw new Error('pickLineBalanced: no lines to pick from')
+  const rng = opts.rng ?? Math.random
+  let pool = lines
+  if (opts.avoidLineId !== undefined && lines.length > 1) {
+    const filtered = lines.filter((l) => l.id !== opts.avoidLineId)
+    if (filtered.length > 0) pool = filtered
+  }
+  const groups = new Map<string, Line[]>()
+  for (const l of pool) {
+    const g = groups.get(l.chapterId)
+    if (g) g.push(l)
+    else groups.set(l.chapterId, [l])
+  }
+  if (groups.size <= 1) return pickLine(pool, stats, now, { rng })
+  const list = [...groups.values()]
+  const weights = list.map((g) => g.reduce((m, l) => Math.max(m, lineWeight(stats[l.id], now)), 0))
+  const total = weights.reduce((a, b) => a + b, 0)
+  let chosen = list[list.length - 1]
+  if (!(total > 0)) chosen = list[Math.min(list.length - 1, Math.floor(rng() * list.length))]
+  else {
+    let r = rng() * total
+    for (let i = 0; i < list.length; i++) {
+      r -= weights[i]
+      if (r < 0) {
+        chosen = list[i]
+        break
+      }
+    }
+  }
+  return pickLine(chosen, stats, now, { rng })
+}
+
 export function openingProgress(
   lines: Line[],
   stats: Record<string, LineStats>,
@@ -112,10 +175,12 @@ export function openingProgress(
     if (!s) continue
     seen++
     if (isMastered(s)) mastered++
-    if (s.dueAt <= now) due++
+    if (isDueToday(s, now)) due++
   }
   const total = lines.length
-  return { total, seen, mastered, due, percentMastered: total ? Math.floor((mastered / total) * 100) : 0 }
+  // Floored (100% only when everything is mastered), but at least 1% once a line is mastered.
+  const percentMastered = total ? (mastered > 0 ? Math.max(1, Math.floor((mastered / total) * 100)) : 0) : 0
+  return { total, seen, mastered, due, percentMastered }
 }
 
 /** Deterministic PRNG (mulberry32) — handy for tests and reproducible picks. */

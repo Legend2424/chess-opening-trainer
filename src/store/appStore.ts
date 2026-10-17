@@ -18,6 +18,10 @@ import * as ops from './profileOps.ts'
 import type { EngineGameOutcome, OpError, OpResult, ShopResult } from './profileOps.ts'
 import type { EngineResult } from './rewards.ts'
 import {
+  auxGet,
+  auxRemove,
+  auxSet,
+  BEFORE_RESTORE_KEY,
   cancelPendingSave,
   clearLoadIssue,
   exportBackup as exportBackupJson,
@@ -27,6 +31,7 @@ import {
   importBackup as importBackupJson,
   loadAppDataDetailed,
   onStorageStatusChange,
+  parseBackup,
   registerLiveStore,
   requestPersistentStorage,
   scheduleSave,
@@ -44,11 +49,22 @@ export type { LoadIssue }
 let state: AppData | null = null
 const listeners = new Set<() => void>()
 
+/**
+ * Bumped whenever the data is swapped wholesale (backup import / undo) or a
+ * player is reset, so session memory kept outside the store (the trainer's
+ * combo and carried mistakes) can start clean. Reading it never loads anything.
+ */
+let storeEpoch = 0
+export function getStoreEpoch(): number {
+  return storeEpoch
+}
+
 function init(): AppData {
   if (state === null) {
     // Roll every player's daily goal/streak over right away, so a cold launch
     // on a new day never shows yesterday's goal ring.
-    state = ops.rolloverAll(loadAppDataDetailed().data, Date.now())
+    const now = Date.now()
+    state = ops.trackClock(ops.rolloverAll(loadAppDataDetailed().data, now), now)
     registerLiveStore({ get: () => getAppData(), replace: (d) => replaceAll(d) })
     // Registered after the first load so nothing notifies during a render.
     onStorageStatusChange(() => {
@@ -92,16 +108,21 @@ function commit(next: AppData, immediate = false): void {
 
 /**
  * Swap in a whole new AppData (backup import). Keeps the current player if they
- * still exist, and the current parent PIN when the backup has none (backups
- * never contain the PIN).
+ * still exist, and this device's parent PIN and recovery code (a hand-made file
+ * can't replace them; backups never contain them). PIN-reset and clock records
+ * of both are merged, so restoring an old backup can't hide a reset.
  */
 function replaceAll(d: AppData): void {
   const cur = getAppData()
   const keepActive = cur.activeProfileId && d.profiles.some((p) => p.id === cur.activeProfileId) ? cur.activeProfileId : null
-  const pin = d.parent.pin ?? cur.parent.pin
   lastLine = null
   engineGames.clear()
-  const next = ops.rolloverAll({ ...d, activeProfileId: keepActive, parent: { ...d.parent, pin } }, Date.now())
+  storeEpoch++
+  const now = Date.now()
+  const next = ops.trackClock(
+    ops.rolloverAll({ ...d, activeProfileId: keepActive, parent: ops.mergeParentOnImport(cur.parent, d.parent) }, now),
+    now,
+  )
   commit(next, true)
 }
 
@@ -215,9 +236,39 @@ export function useStorageStatus(): StorageStatus {
 /** Sliding window: each parent action extends it. The Parent screen should still call lockParent() on unmount. */
 const PARENT_SESSION_MS = 2 * 60 * 1000
 const PIN_FREE_TRIES = 5
-let pinFails = 0
-let pinLockedUntil = 0
+const PIN_LOCK_MAX_MS = 5 * 60_000
+/** Wrong PINs / grown-up answers survive a reload (side keys: never in backups). */
+const PINLOCK_KEY = 'opening-quest.pinlock'
+const ADULTCHECK_KEY = 'opening-quest.adultcheck'
+const ADULT_FREE_TRIES = 2
+const ADULT_LOCK_MAX_MS = 10 * 60_000
 let parentUnlockedUntil = 0
+
+interface TryLock {
+  fails: number
+  lockedUntil: number
+}
+
+/** Read a try-counter; a lock further ahead than `maxMs` (clock moved) is clamped. */
+function readLock(key: string, maxMs: number): TryLock {
+  try {
+    const raw: unknown = JSON.parse(auxGet(key) ?? 'null')
+    if (raw && typeof raw === 'object') {
+      const o = raw as Record<string, unknown>
+      const fails = typeof o.fails === 'number' && Number.isFinite(o.fails) && o.fails > 0 ? Math.floor(o.fails) : 0
+      const until = typeof o.lockedUntil === 'number' && Number.isFinite(o.lockedUntil) ? o.lockedUntil : 0
+      return { fails, lockedUntil: Math.min(until, Date.now() + maxMs) }
+    }
+  } catch {
+    // unreadable: start over
+  }
+  return { fails: 0, lockedUntil: 0 }
+}
+
+function writeLock(key: string, s: TryLock): void {
+  if (s.fails === 0 && s.lockedUntil === 0) auxRemove(key)
+  else auxSet(key, JSON.stringify(s))
+}
 
 function touchParent(): void {
   if (Date.now() < parentUnlockedUntil) parentUnlockedUntil = Date.now() + PARENT_SESSION_MS
@@ -289,7 +340,8 @@ export const actions = {
   },
   /** Daily rollover for every player (runs at start, on focus and every minute). */
   refreshDaily(): void {
-    commit(ops.rolloverAll(getAppData(), Date.now()))
+    const now = Date.now()
+    commit(ops.trackClock(ops.rolloverAll(getAppData(), now), now))
   },
 
   // --- training --------------------------------------------------------
@@ -369,9 +421,20 @@ export const actions = {
     touchParent()
     return run(ops.resolveRedemption(getAppData(), profileId, redemptionId, approve, Date.now()))
   },
-  adjustCoins(profileId: string, delta: number, note: string): Plain<ShopResult> {
+  /** "Undo" a few seconds after approving: the request waits again. */
+  unresolveRedemption(profileId: string, redemptionId: string): SimpleResult {
     touchParent()
-    return run(ops.adjustCoins(getAppData(), profileId, delta, note, Date.now()))
+    return run(ops.unresolveRedemption(getAppData(), profileId, redemptionId, Date.now()))
+  },
+  /** Gift (+) or remove (−). `countsTowardLevel` defaults to true for gifts (false = e.g. giving back removed coins). */
+  adjustCoins(profileId: string, delta: number, note: string, countsTowardLevel?: boolean): Plain<ShopResult> {
+    touchParent()
+    return run(ops.adjustCoins(getAppData(), profileId, delta, note, Date.now(), countsTowardLevel ?? delta > 0))
+  },
+  /** "Undo" right after a gift: coins and the XP it added go back. */
+  undoGift(profileId: string, amount: number): SimpleResult {
+    touchParent()
+    return run(ops.undoGift(getAppData(), profileId, amount, Date.now()))
   },
 
   // --- parent: PIN -----------------------------------------------------
@@ -387,21 +450,41 @@ export const actions = {
    */
   verifyPin(pin: string): boolean {
     const t = Date.now()
-    if (t < pinLockedUntil) return false
+    const lock = readLock(PINLOCK_KEY, PIN_LOCK_MAX_MS)
+    if (t < lock.lockedUntil) return false
     const stored = getAppData().parent.pin
     const ok = ops.pinMatches(stored, pin) && stored !== null
     if (ok) {
-      pinFails = 0
+      writeLock(PINLOCK_KEY, { fails: 0, lockedUntil: 0 })
       parentUnlockedUntil = t + PARENT_SESSION_MS
     } else {
-      pinFails++
-      if (pinFails >= PIN_FREE_TRIES) pinLockedUntil = t + Math.min(5 * 60_000, 30_000 * 2 ** (pinFails - PIN_FREE_TRIES))
+      // The count survives a reload, so the wait keeps growing across launches.
+      const fails = lock.fails + 1
+      const lockedUntil = fails >= PIN_FREE_TRIES ? t + Math.min(PIN_LOCK_MAX_MS, 30_000 * 2 ** (fails - PIN_FREE_TRIES)) : lock.lockedUntil
+      writeLock(PINLOCK_KEY, { fails, lockedUntil })
     }
     return ok
   },
   /** Milliseconds until PIN entry is allowed again (0 = now). */
   pinLockoutMs(): number {
-    return Math.max(0, pinLockedUntil - Date.now())
+    return Math.max(0, readLock(PINLOCK_KEY, PIN_LOCK_MAX_MS).lockedUntil - Date.now())
+  },
+  /** Milliseconds until the grown-up question may be answered again (0 = now). */
+  adultCheckLockoutMs(): number {
+    return Math.max(0, readLock(ADULTCHECK_KEY, ADULT_LOCK_MAX_MS).lockedUntil - Date.now())
+  },
+  /** Record a grown-up-question answer: after 2 wrong ones, a 30 s wait that doubles each time (max 10 min). */
+  adultCheckAnswered(correct: boolean): void {
+    if (correct) {
+      writeLock(ADULTCHECK_KEY, { fails: 0, lockedUntil: 0 })
+      return
+    }
+    const t = Date.now()
+    const lock = readLock(ADULTCHECK_KEY, ADULT_LOCK_MAX_MS)
+    const fails = lock.fails + 1
+    const lockedUntil =
+      fails >= ADULT_FREE_TRIES ? t + Math.min(ADULT_LOCK_MAX_MS, 30_000 * 2 ** (fails - ADULT_FREE_TRIES)) : lock.lockedUntil
+    writeLock(ADULTCHECK_KEY, { fails, lockedUntil })
   },
   isParentUnlocked(): boolean {
     return Date.now() < parentUnlockedUntil
@@ -422,21 +505,55 @@ export const actions = {
     if (r.ok) parentUnlockedUntil = Date.now() + PARENT_SESSION_MS
     return r
   },
-  /**
-   * "Forgot the PIN?" — replace it without the old one (the UI puts a grown-up
-   * check in front). Recorded as parent.pinResetAt so the parent zone can show it.
-   */
-  resetPin(pin: string): SimpleResult {
-    if (getStorageStatus().loadIssue) {
-      return { ok: false, error: 'invalid', message: "The saved data can't be read right now, so the PIN can't be changed." }
-    }
-    const r = run(ops.resetPin(getAppData(), pin, Date.now()))
-    if (r.ok) {
-      pinFails = 0
-      pinLockedUntil = 0
-      parentUnlockedUntil = Date.now() + PARENT_SESSION_MS
-    }
+  /** True when a recovery code was set up on this device. */
+  hasRecoveryCode(): boolean {
+    return !!getAppData().parent.recoveryHash
+  },
+  /** Store (the hash of) a new recovery code; needs the parent session (or no PIN yet). */
+  setRecoveryCode(code: string): SimpleResult {
+    const d = getAppData()
+    if (d.parent.pin !== null && !actions.isParentUnlocked()) return { ok: false, error: 'invalid', message: 'Enter the PIN first.' }
+    if (ops.cleanRecoveryCode(code).length < 8) return { ok: false, error: 'invalid' }
+    touchParent()
+    const r = run(ops.setRecoveryHash(d, ops.hashRecoveryCode(code)))
+    flushSave()
     return r
+  },
+  checkRecoveryCode(code: string): boolean {
+    return ops.recoveryCodeMatches(getAppData().parent, code)
+  },
+  /** "Forgot the PIN?" with the recovery code: set a new PIN right away. */
+  resetPinWithCode(code: string, pin: string): SimpleResult {
+    if (!ops.recoveryCodeMatches(getAppData().parent, code)) return { ok: false, error: 'invalid', message: "That recovery code isn't right." }
+    return finishPinReset(pin, false)
+  },
+  /**
+   * "Forgot the PIN?" without the recovery code: the first call starts a 24-hour
+   * wait (shown to whoever opens the parent zone with the PIN, who can cancel it).
+   */
+  requestPinReset(): SimpleResult & { readyAt: number | null } {
+    const r = run(ops.requestPinReset(getAppData(), Date.now()))
+    flushSave()
+    return { ...r, readyAt: ops.pinResetReadyAt(getAppData().parent) }
+  },
+  cancelPinResetRequest(): SimpleResult {
+    touchParent()
+    return run(ops.cancelPinResetRequest(getAppData()))
+  },
+  /** After the 24-hour wait: set the new PIN (approvals and gifts then pause for a day). */
+  resetPinAfterWait(pin: string): SimpleResult {
+    const ready = ops.pinResetReadyAt(getAppData().parent)
+    if (ready === null || Date.now() < ready) return { ok: false, error: 'invalid', message: 'The new PIN can only be set when the wait is over.' }
+    return finishPinReset(pin, true)
+  },
+  /** "That was me": hide the PIN-reset notices. */
+  ackPinReset(): SimpleResult {
+    touchParent()
+    return run(ops.ackPinReset(getAppData(), Date.now()))
+  },
+  clearClockJumps(): void {
+    touchParent()
+    commit(ops.clearClockJumps(getAppData()))
   },
 
   // --- parent: rewards & training settings ----------------------------
@@ -452,7 +569,7 @@ export const actions = {
     touchParent()
     return run(ops.removeReward(getAppData(), rewardId))
   },
-  /** Note: changing line length re-ids truncated lines (their progress starts over) — warn the parent. */
+  /** Changing the line length re-ids lines that get cut differently (their progress starts over; the old length brings it back). The Training tab shows how many before asking. */
   setMaxPly(openingId: string, ply: number): SimpleResult {
     touchParent()
     return run(ops.setMaxPly(getAppData(), openingId, ply))
@@ -478,6 +595,7 @@ export const actions = {
   resetProfile(profileId: string): SimpleResult {
     touchParent()
     lastLine = null
+    storeEpoch++
     return run(ops.resetProfile(getAppData(), profileId, Date.now()))
   },
 
@@ -497,11 +615,36 @@ export const actions = {
     flushSave()
     return exportBackupJson(getAppData())
   },
-  /** Validate first; applies all-or-nothing. Keeps the current PIN (backups have none). Ends a paused-saving state. */
+  /**
+   * Validate first; applies all-or-nothing. Keeps the current PIN (backups have none). Ends a
+   * paused-saving state. The data as it was is kept aside first, for undoRestore().
+   */
   importBackup(json: string): { ok: boolean; error?: string } {
     touchParent()
     getAppData() // make sure the live store is registered
+    if (parseBackup(json).ok && !getLoadIssue()) {
+      flushSave()
+      // Best effort (a quota problem just means no undo).
+      if (!auxSet(BEFORE_RESTORE_KEY, exportBackupJson(getAppData()))) auxRemove(BEFORE_RESTORE_KEY)
+    }
     return importBackupJson(json)
+  },
+  /** A copy from before the last restore exists ("Undo restore"). */
+  hasRestoreUndo(): boolean {
+    return auxGet(BEFORE_RESTORE_KEY) !== null
+  },
+  /** Put back the data from just before the last backup restore. */
+  undoRestore(): { ok: boolean; error?: string } {
+    touchParent()
+    const text = auxGet(BEFORE_RESTORE_KEY)
+    if (!text) return { ok: false, error: 'Nothing to undo.' }
+    getAppData()
+    const r = importBackupJson(text)
+    if (r.ok) auxRemove(BEFORE_RESTORE_KEY)
+    return r
+  },
+  forgetRestoreUndo(): void {
+    auxRemove(BEFORE_RESTORE_KEY)
   },
   /**
    * "Start fresh" after the saved data couldn't be read (useStorageStatus().loadIssue):
@@ -516,6 +659,21 @@ export const actions = {
     notify()
     return saved ? { ok: true } : { ok: false, error: 'invalid', message: getLastSaveError() ?? 'Saving failed.' }
   },
+}
+
+/** Shared end of both "Forgot the PIN?" paths. */
+function finishPinReset(pin: string, fallback: boolean): SimpleResult {
+  if (getStorageStatus().loadIssue) {
+    return { ok: false, error: 'invalid', message: "The saved data can't be read right now, so the PIN can't be changed." }
+  }
+  const r = run(ops.resetPin(getAppData(), pin, Date.now(), { fallback }))
+  if (r.ok) {
+    flushSave()
+    writeLock(PINLOCK_KEY, { fails: 0, lockedUntil: 0 })
+    writeLock(ADULTCHECK_KEY, { fails: 0, lockedUntil: 0 })
+    parentUnlockedUntil = Date.now() + PARENT_SESSION_MS
+  }
+  return r
 }
 
 export type Actions = typeof actions

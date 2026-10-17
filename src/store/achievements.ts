@@ -170,10 +170,6 @@ export const ACHIEVEMENTS: AchievementDef[] = RULES.map(({ test: _test, ...def }
 
 const DEF_BY_ID = new Map(ACHIEVEMENTS.map((a) => [a.id, a]))
 
-export function achievementById(id: string): AchievementDef | undefined {
-  return DEF_BY_ID.get(id)
-}
-
 /** Newly unlocked achievements (never ones already in profile.achievements). */
 export function checkAchievements(profile: Profile, ctx: AchievementContext): AchievementDef[] {
   const out: AchievementDef[] = []

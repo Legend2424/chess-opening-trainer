@@ -14,7 +14,14 @@ const output = process.argv[3] ?? 'public/studies/opening-lines.pgn'
 const KEEP_HEADERS = new Set(['ChapterName', 'ChapterURL', 'FEN', 'SetUp', 'Variant', 'ECO', 'Opening', 'Orientation', 'Result'])
 
 const wanted = new Set<string>()
-for (const o of OPENINGS) for (const c of [...o.chapters, ...o.extraChapters]) wanted.add(c.id)
+/** The app's own chapter titles: the published file never carries the study's chapter names (they can name people). */
+const titles = new Map<string, string>()
+for (const o of OPENINGS) {
+  for (const c of [...o.chapters, ...o.extraChapters]) {
+    wanted.add(c.id)
+    titles.set(c.id, c.title)
+  }
+}
 
 const text = readFileSync(input, 'utf8').replace(/\r\n/g, '\n')
 const games = text.split(/\n\s*\n(?=\[Event )/)
@@ -30,7 +37,8 @@ for (const g of games) {
   let i = 0
   for (; i < lines.length && lines[i].startsWith('['); i++) {
     const key = lines[i].match(/^\[(\w+) /)?.[1]
-    if (key && KEEP_HEADERS.has(key)) headers.push(lines[i])
+    if (key === 'ChapterName') headers.push(`[ChapterName "${(titles.get(id) ?? id).replace(/["\\]/g, '')}"]`)
+    else if (key && KEEP_HEADERS.has(key)) headers.push(lines[i])
   }
   // Lichess stores annotator handles in [%anno "..."] commands; drop them.
   const movetext = lines.slice(i).join('\n').trim().replace(/\[%anno [^\]]*\]/g, '').replace(/\{\s*\}/g, '')

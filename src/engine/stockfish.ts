@@ -1,5 +1,6 @@
-// Thin wrapper around the single-threaded Stockfish NNUE WASM build.
-// Runs entirely in the browser (no server, no per-move network calls).
+// Thin wrapper around the single-threaded Stockfish 16 WASM build (nmrugg/stockfish.js,
+// GPLv3 — see public/engine/README.md). It runs with the classical evaluation (the NNUE
+// net is not shipped). Runs entirely in the browser (no server, no per-move network calls).
 //
 // STRENGTH MODEL — Skill Level + search depth (calibrated to Lichess's levels).
 // Earlier attempts used UCI_Elo (injects random blunders -> inconsistent) and a
@@ -13,6 +14,8 @@
 // TOP of the slider = full Skill 20 at a deep search so it genuinely plays the
 // best move. The thinking-time slider becomes a movetime *cap* (whichever of
 // depth / time is reached first), so strong levels stay responsive.
+
+import { assetUrl } from '../util/assetUrl.ts'
 
 export interface StrengthSettings {
   /** Target opponent strength, ~800–2000. */
@@ -29,7 +32,7 @@ export interface Score {
 
 type BestMoveCallback = (uci: string) => void
 
-const ENGINE_URL = `${import.meta.env.BASE_URL}engine/stockfish-nnue-16-single.js`
+const ENGINE_URL = assetUrl('engine/stockfish-nnue-16-single.js')
 
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x))
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t
@@ -50,21 +53,41 @@ export function ratingToSkillDepth(rating: number): { skill: number; depth: numb
   return { skill: 20, depth: clamp(Math.round(lerp(16, 24, t)), 1, 40) }
 }
 
+/**
+ * One search the engine runs (robot move, evaluation or best-move query).
+ * Searches run ONE AT A TIME, in order, so every `bestmove` belongs to the
+ * search at the head of the queue (no cross-talk between the trainer's
+ * mistake check and the robot's move).
+ */
+interface Task {
+  fen: string
+  /** The `go …` command. */
+  go: string
+  /** Skill Level for this search (20 = full strength for analysis). */
+  skill: number
+  /** Give up (resolve null, report a hang) if no bestmove after this long once STARTED; 0 = never. */
+  timeoutMs: number
+  /** Called exactly once: with the result, or with nulls when cancelled / timed out / disposed. */
+  done: (bestmove: string | null, score: Score | null) => void
+  timer?: ReturnType<typeof setTimeout>
+}
+
 export class Engine {
   private worker: Worker | null = null
-  private ready = false
-  private readyWaiters: Array<() => void> = []
-  private onBestMove: BestMoveCallback | null = null
-  private onEval: ((s: Score | null) => void) | null = null
-  private onBestQuery: ((uci: string | null) => void) | null = null
   private lastScore: Score | null = null
-  private evalQueue: Promise<Score | null> = Promise.resolve(null)
   private strength: StrengthSettings = { rating: 1200, moveTimeMs: 3000 }
   private playDepth = 10
-  /** Searches started (`go`) whose `bestmove` hasn't arrived yet. */
-  private pendingSearches = 0
-  /** bestmove replies still due from searches cancelled by stop(); they must not answer newer queries. */
+  private playSkill = 20
+  /** Skill Level last sent to the worker (null = unknown). */
+  private sentSkill: number | null = null
+  private queue: Task[] = []
+  private current: Task | null = null
+  /** `go` commands sent whose `bestmove` hasn't arrived yet. */
+  private inFlight = 0
+  /** bestmove replies still due from searches that were stopped; they answer nobody. */
   private staleBestmoves = 0
+  /** Called when a started search never answers (the worker is probably stuck). */
+  onHang: (() => void) | null = null
 
   /**
    * Load the wasm engine and complete the UCI handshake. Rejects if the worker
@@ -89,8 +112,10 @@ export class Engine {
       this.send('uci')
       await this.waitFor('uciok')
       this.send('setoption name Threads value 1')
-      this.send('setoption name Hash value 64')
+      // 16 MB is plenty for depth ≤ 24 on one thread, and kinder to an iPad's memory.
+      this.send('setoption name Hash value 16')
       this.send('setoption name UCI_AnalyseMode value false')
+      this.send('setoption name UCI_LimitStrength value false')
       await this.isReady()
     })()
     try {
@@ -98,15 +123,6 @@ export class Engine {
     } finally {
       clearTimeout(timer)
     }
-    this.ready = true
-    this.readyWaiters.forEach((r) => r())
-    this.readyWaiters = []
-  }
-
-  /** Resolves once the engine has finished loading. */
-  whenReady(): Promise<void> {
-    if (this.ready) return Promise.resolve()
-    return new Promise((res) => this.readyWaiters.push(res))
   }
 
   private send(cmd: string) {
@@ -132,28 +148,21 @@ export class Engine {
     }
 
     if (line.startsWith('bestmove')) {
-      if (this.pendingSearches > 0) this.pendingSearches--
+      if (this.inFlight > 0) this.inFlight--
       if (this.staleBestmoves > 0) {
+        // The reply of a stopped search: the next search's info lines come after it.
         this.staleBestmoves--
+        this.lastScore = null
         return
       }
-      const uciMove = line.split(/\s+/)[1]
-      if (this.onBestQuery) {
-        const cb = this.onBestQuery
-        this.onBestQuery = null
-        cb(uciMove && uciMove !== '(none)' ? uciMove : null)
-        return
+      const t = this.current
+      this.current = null
+      if (t) {
+        clearTimeout(t.timer)
+        const uciMove = line.split(/\s+/)[1]
+        t.done(uciMove && uciMove !== '(none)' ? uciMove : null, this.lastScore)
       }
-      if (this.onEval) {
-        const cb = this.onEval
-        const s = this.lastScore
-        this.onEval = null
-        cb(s)
-        return
-      }
-      const cb = this.onBestMove
-      this.onBestMove = null
-      if (cb && uciMove && uciMove !== '(none)') cb(uciMove)
+      this.pump()
     }
   }
 
@@ -168,110 +177,116 @@ export class Engine {
     return this.waitFor('readyok')
   }
 
+  // --- The search queue --------------------------------------------------
+
+  private enqueue(t: Task) {
+    if (!this.worker) {
+      t.done(null, null)
+      return
+    }
+    this.queue.push(t)
+    this.pump()
+  }
+
+  /** Starts the next queued search if none is running. */
+  private pump() {
+    if (this.current || !this.worker) return
+    const t = this.queue.shift()
+    if (!t) return
+    this.current = t
+    this.lastScore = null
+    if (this.sentSkill !== t.skill) {
+      this.send(`setoption name Skill Level value ${t.skill}`)
+      this.sentSkill = t.skill
+    }
+    this.send(`position fen ${t.fen}`)
+    this.inFlight++
+    this.send(t.go)
+    if (t.timeoutMs > 0) t.timer = setTimeout(() => this.timedOut(t), t.timeoutMs)
+  }
+
+  private timedOut(t: Task) {
+    if (this.current !== t) return
+    this.current = null
+    this.staleBestmoves = this.inFlight
+    if (this.inFlight > 0) this.send('stop')
+    t.done(null, null)
+    this.onHang?.()
+    this.pump()
+  }
+
   // --- Strength ----------------------------------------------------------
 
+  /** Playing strength for go(): Skill Level is sent with each robot search (analysis always runs at 20). */
   setStrength(s: StrengthSettings) {
     this.strength = s
     const { skill, depth } = ratingToSkillDepth(s.rating)
     this.playDepth = depth
     // Skill Level weakens by occasionally choosing a slightly worse candidate;
     // at 20 there is no weakening, so the top of the slider plays best moves.
-    this.send('setoption name UCI_LimitStrength value false')
-    this.send(`setoption name Skill Level value ${skill}`)
+    this.playSkill = skill
   }
 
   // --- Search ------------------------------------------------------------
 
-  newGame() {
-    this.send('ucinewgame')
-  }
-
-  /** Full strength (Skill Level 20) — use before analysis on an engine that also plays. */
-  setFullStrength() {
-    this.send('setoption name UCI_LimitStrength value false')
-    this.send('setoption name Skill Level value 20')
-  }
-
-  private startSearch(goCmd: string) {
-    this.pendingSearches++
-    this.send(goCmd)
-  }
-
-  /** Ask for a move from the given FEN. Calls back with a UCI move string. */
+  /** Ask for a move from the given FEN. Calls back with a UCI move string (never after stop()). */
   go(fen: string, cb: BestMoveCallback) {
-    this.onBestMove = cb
-    this.send(`position fen ${fen}`)
     // Depth drives strength; movetime is a safety cap so strong levels in a
     // complex position still answer promptly. Whichever is reached first wins.
-    this.startSearch(`go depth ${this.playDepth} movetime ${this.strength.moveTimeMs}`)
+    this.enqueue({
+      fen,
+      go: `go depth ${this.playDepth} movetime ${this.strength.moveTimeMs}`,
+      skill: this.playSkill,
+      timeoutMs: 0, // the Play screen has its own "the robot is stuck" handling
+      done: (uci) => {
+        if (uci) cb(uci)
+      },
+    })
   }
 
   /**
-   * Evaluate a position to a fixed depth, returning the score from the
-   * perspective of the side to move. Calls serialize on this worker, so it's
-   * safe to fire several in a row (used by the analysis engine for hints and
-   * blunder detection — keep it OFF the playing engine).
+   * Evaluate a position to a fixed depth (full strength), returning the score
+   * from the perspective of the side to move, or null (cancelled / timed out).
+   * `timeoutMs` counts from when the search STARTS, not from when it was queued.
    */
-  evaluate(fen: string, depth = 12): Promise<Score | null> {
-    const task = () =>
-      new Promise<Score | null>((resolve) => {
-        this.onEval = resolve
-        this.lastScore = null
-        this.send(`position fen ${fen}`)
-        this.startSearch(`go depth ${depth}`)
-      })
-    this.evalQueue = this.evalQueue.then(task, task)
-    return this.evalQueue
+  evaluate(fen: string, depth = 12, timeoutMs = 0): Promise<Score | null> {
+    return new Promise((resolve) => {
+      this.enqueue({ fen, go: `go depth ${depth}`, skill: 20, timeoutMs, done: (_m, score) => resolve(score) })
+    })
+  }
+
+  /** Find the best move at a fixed depth (full strength), as a UCI string, or null. Used by the "Show best move" hint. */
+  bestMoveAtDepth(fen: string, depth = 18, timeoutMs = 0): Promise<string | null> {
+    return new Promise((resolve) => {
+      this.enqueue({ fen, go: `go depth ${depth}`, skill: 20, timeoutMs, done: (uci) => resolve(uci) })
+    })
   }
 
   /**
-   * Find the best move at a fixed (deep) depth, returning a UCI move string.
-   * Serializes on the eval queue like evaluate(), so use it on the full-strength
-   * analysis engine — never the playing engine. Used by the "Show best move" hint.
-   */
-  bestMoveAtDepth(fen: string, depth = 18): Promise<string | null> {
-    const task = () =>
-      new Promise<string | null>((resolve) => {
-        this.onBestQuery = resolve
-        this.send(`position fen ${fen}`)
-        this.startSearch(`go depth ${depth}`)
-      })
-    this.evalQueue = this.evalQueue.then(task, task) as Promise<Score | null>
-    return this.evalQueue as unknown as Promise<string | null>
-  }
-
-  /**
-   * Stop the current search (e.g. when the position changes mid-think).
-   * Pending evaluate()/bestMoveAtDepth() promises resolve with null so the
-   * queue keeps flowing, and the cancelled search's late `bestmove` is ignored
-   * instead of answering the next query.
+   * Cancel EVERYTHING: the running search (its late `bestmove` is ignored) and
+   * every queued one. Pending evaluate()/bestMoveAtDepth() promises resolve with
+   * null; a cancelled go() never calls back.
    */
   stop() {
-    const evalCb = this.onEval
-    const bestCb = this.onBestQuery
-    this.onBestMove = null
-    this.onEval = null
-    this.onBestQuery = null
-    this.staleBestmoves = this.pendingSearches
-    if (this.pendingSearches > 0) this.send('stop')
-    evalCb?.(null)
-    bestCb?.(null)
+    const cancelled = [...(this.current ? [this.current] : []), ...this.queue]
+    this.current = null
+    this.queue = []
+    this.staleBestmoves = this.inFlight
+    if (this.inFlight > 0) this.send('stop')
+    for (const t of cancelled) {
+      clearTimeout(t.timer)
+      t.done(null, null)
+    }
   }
 
   dispose() {
-    const evalCb = this.onEval
-    const bestCb = this.onBestQuery
-    this.onBestMove = null
-    this.onEval = null
-    this.onBestQuery = null
+    this.stop()
+    this.onHang = null
     this.worker?.terminate()
     this.worker = null
-    this.ready = false
-    this.pendingSearches = 0
+    this.inFlight = 0
     this.staleBestmoves = 0
+    this.sentSkill = null
     this.lineWaiters = []
-    // Let queued evaluate()/bestMoveAtDepth() callers move on.
-    evalCb?.(null)
-    bestCb?.(null)
   }
 }

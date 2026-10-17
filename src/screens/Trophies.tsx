@@ -26,7 +26,7 @@ export default function Trophies() {
 
   return (
     <div className="screen game-ui meta-screen trophies">
-      <PlayerTopBar profile={profile} onBack={() => nav.back()} center="🏆 Trophies" onCoinsClick={() => nav.go({ name: 'shop' })} />
+      <PlayerTopBar profile={profile} onBack={() => nav.back()} center="🏆 Trophies" onCoinsClick={() => nav.goOrPop({ name: 'shop' })} />
       <div className="meta-scroll">
         <div className="meta-page trophies__page">
           <SaveErrorBanner />
@@ -34,7 +34,7 @@ export default function Trophies() {
             <HeroCard profile={profile} unlocked={unlocked} />
             <StatsGrid profile={profile} now={now} />
           </div>
-          <Shelf profile={profile} onShop={() => nav.go({ name: 'shop', tab: 'trophy' })} />
+          <Shelf profile={profile} onShop={() => nav.goOrPop({ name: 'shop', tab: 'trophy' })} />
           <section className="trophies__section">
             <h2 className="meta-section-title on-bg">
               🏅 Achievements

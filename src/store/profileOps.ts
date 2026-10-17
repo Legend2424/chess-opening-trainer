@@ -27,6 +27,7 @@ import { findItem, itemById } from './catalog.ts'
 import { createProfile, defaultSeedFor, HISTORY_CAP, localDateKey } from './defaults.ts'
 import type { DailyStateX } from './defaults.ts'
 import { levelForXp, levelUpBetween } from './levels.ts'
+import { OPENINGS } from '../data/openings.ts'
 import {
   clampDailyGoal,
   computeLineReward,
@@ -65,6 +66,10 @@ export type OpError =
   | 'weekly-limit'
   | 'not-pending'
   | 'invalid'
+  | 'name-taken'
+  | 'reset-cooldown'
+  | 'no-chapters'
+  | 'too-late'
 
 /** Kid-friendly messages for each error code. */
 export const OP_ERROR_MESSAGES: Record<OpError, string> = {
@@ -80,6 +85,11 @@ export const OP_ERROR_MESSAGES: Record<OpError, string> = {
   'weekly-limit': "You've asked for this one enough this week. Try again in a few days! 📅",
   'not-pending': 'That request was already answered.',
   'invalid': "That didn't look right — please try again.",
+  'name-taken': 'Another player already has that name.',
+  'reset-cooldown':
+    'For safety, approving rewards and gifting coins pause for 24 hours after the PIN was reset without the recovery code.',
+  'no-chapters': "This file has none of the coach's chapters — download the whole study (all chapters) and try again.",
+  'too-late': 'Too late to undo that one.',
 }
 
 export interface OpResult {
@@ -212,20 +222,19 @@ export function currentDaily(profile: Profile, now: number): DailyStateX {
   return effectiveDaily(profile, now)
 }
 
+/**
+ * Today's goal for display. `met` = the goal was really claimed (bonus paid,
+ * streak counted). After a parent LOWERS the goal, `done >= goal` can be true
+ * while `met` is still false: the next new line claims it (show that, not "Done!").
+ */
 export function dailyGoalProgress(profile: Profile, now: number, goalLines: number): { done: number; goal: number; met: boolean } {
   const d = effectiveDaily(profile, now)
   const goal = clampDailyGoal(goalLines)
   const done = distinctLineIdsOf(d).length
-  return { done, goal, met: d.goalClaimed || done >= goal }
+  return { done, goal, met: d.goalClaimed }
 }
 
 export { currentStreak } from './rewards.ts'
-
-/** Apply ensureDaily to one profile inside AppData. */
-export function rolloverProfile(data: AppData, profileId: string, now: number): AppData {
-  const p = getProfile(data, profileId)
-  return p ? withProfile(data, ensureDaily(p, now)) : data
-}
 
 // ---------------------------------------------------------------------------
 // Line results
@@ -266,11 +275,26 @@ export function applyLineResult(
   const r = computeLineReward(input, p, data.parent.dailyGoalLines)
 
   // Line stats
-  const newStats = nextLineStats(
+  let newStats: LineStats = nextLineStats(
     prevStats,
     { mistakes: input.mistakes, hintsUsed: input.hintsUsed, usedArrowHint: input.usedArrowHint, learnMode: input.learnMode },
     now,
   )
+  // A farmed run (quick repeat of a line that isn't due) may lower the box but
+  // never makes the line due sooner: otherwise "fail on purpose, then replay"
+  // would turn the 2-coin repeat back into a full-pay "due" run every time.
+  // The one-off full-pay run after a learn-mode run is treated the same way.
+  if ((r.farmed || r.afterLearn) && prevStats && Number.isFinite(prevStats.dueAt)) {
+    newStats = { ...newStats, dueAt: Math.max(newStats.dueAt, prevStats.dueAt) }
+  }
+  const learnCompletions = nonNegInt(prevStats?.learnCompletions) + (r.learnLike ? 1 : 0)
+  if (learnCompletions > 0) newStats.learnCompletions = learnCompletions
+  // After a paid learn-mode run, the next normal run is never "farmed" (the
+  // completion screen promises bonus coins for trying without the arrows). A
+  // farmed learn-mode repeat keeps that promise; nothing else renews it.
+  if (r.learnLike && (!r.farmed || prevStats?.learnPending === true)) newStats.learnPending = true
+  // The single full-pay quick retry of a just-failed line has been used.
+  if (r.farmed ? prevStats?.quickRetryUsed === true : r.retryOfFail) newStats.quickRetryUsed = true
   const lineMastered = !isLineMastered(prevStats) && isLineMastered(newStats)
 
   // Totals. Farmed runs (quick repeats of a line just done well) pay a flat 2
@@ -498,17 +522,34 @@ export function requestRedemption(data: AppData, profileId: string, rewardId: st
   return { data: withProfile(data, p), ok: true, redemption }
 }
 
-/** Parent approves or declines a pending request. Decline refunds the coins (no XP). */
+/**
+ * Parent approves or declines a pending request. Decline refunds the coins (no XP).
+ * Approving is paused for a day after a PIN reset done without the recovery code.
+ */
 export function resolveRedemption(data: AppData, profileId: string, redemptionId: string, approve: boolean, now: number): ShopResult {
   const p0 = getProfile(data, profileId)
   if (!p0) return failShop(data, 'no-profile')
   const red = p0.redemptions.find((r) => r.id === redemptionId)
   if (!red || red.status !== 'pending') return failShop(data, 'not-pending')
+  if (approve && now < resetCooldownUntil(data.parent)) return failShop(data, 'reset-cooldown')
   const updated: Redemption = { ...red, status: approve ? 'approved' : 'declined', resolvedAt: now }
   let p: Profile = { ...p0, redemptions: p0.redemptions.map((r) => (r === red ? updated : r)) }
   if (!approve) p = addCoins(p, red.cost, `↩️ Refund: ${red.rewardName}`, now, false)
   const { profile: p2, unlocked } = unlockAndGrant(p, { now })
   return { data: withProfile(data, p2), ok: true, newAchievements: unlocked, levelUp: levelUpBetween(p0.xp, p2.xp) }
+}
+
+/** "Undo" a moment after approving: back to waiting (only within UNDO_APPROVE_MS). */
+export const UNDO_APPROVE_MS = 10_000
+export function unresolveRedemption(data: AppData, profileId: string, redemptionId: string, now: number): OpResult {
+  const p0 = getProfile(data, profileId)
+  if (!p0) return fail(data, 'no-profile')
+  const red = p0.redemptions.find((r) => r.id === redemptionId)
+  if (!red || red.status !== 'approved' || red.resolvedAt === undefined) return fail(data, 'not-pending')
+  if (!(now - red.resolvedAt < UNDO_APPROVE_MS && now >= red.resolvedAt - 1000)) return fail(data, 'too-late')
+  const back: Redemption = { ...red, status: 'pending' }
+  delete back.resolvedAt
+  return { data: withProfile(data, { ...p0, redemptions: p0.redemptions.map((r) => (r === red ? back : r)) }), ok: true }
 }
 
 /** All pending requests across profiles (for the Parent zone). */
@@ -524,15 +565,42 @@ export function pendingRedemptions(data: AppData): Array<{ profileId: string; pr
 // Parent: coins, profiles
 // ---------------------------------------------------------------------------
 
-/** Parent gift (+, counts toward XP) or removal (−, never below 0). */
-export function adjustCoins(data: AppData, profileId: string, delta: number, note: string, now: number): ShopResult {
+/**
+ * Parent gift (+) or removal (−, never below 0). A gift counts toward the level
+ * (XP) unless `countsTowardLevel` is false (e.g. giving back coins removed by
+ * mistake). Gifts are paused for a day after a PIN reset without the recovery code.
+ */
+export function adjustCoins(
+  data: AppData,
+  profileId: string,
+  delta: number,
+  note: string,
+  now: number,
+  countsTowardLevel: boolean = delta > 0,
+): ShopResult {
   const p0 = getProfile(data, profileId)
   if (!p0) return failShop(data, 'no-profile')
   if (!Number.isFinite(delta) || Math.trunc(delta) === 0 || Math.abs(delta) > MAX_COIN_ADJUST) return failShop(data, 'invalid')
   const d = Math.trunc(delta)
+  if (d > 0 && now < resetCooldownUntil(data.parent)) return failShop(data, 'reset-cooldown')
   const text = typeof note === 'string' && note.trim() ? note.trim().slice(0, 80) : d > 0 ? 'Gift from a parent' : 'Removed by a parent'
-  const p = addCoins(p0, d, `${d > 0 ? '🎁' : '➖'} ${text}`, now, true)
+  const p = addCoins(p0, d, `${d > 0 ? '🎁' : '➖'} ${text}`, now, countsTowardLevel)
   return { data: withProfile(data, p), ok: true, newAchievements: [], levelUp: levelUpBetween(p0.xp, p.xp) }
+}
+
+/**
+ * "Undo" right after a parent gift: takes the coins back AND the XP the gift
+ * added (a mistaken gift shouldn't leave the kid a level higher).
+ */
+export function undoGift(data: AppData, profileId: string, amount: number, now: number): OpResult {
+  const p0 = getProfile(data, profileId)
+  if (!p0) return fail(data, 'no-profile')
+  const n = nonNegInt(amount)
+  if (n < 1 || n > MAX_COIN_ADJUST) return fail(data, 'invalid')
+  const p1 = addCoins(p0, -n, '↩️ Gift undone', now, false)
+  const taken = nonNegInt(p0.coins) - nonNegInt(p1.coins)
+  const p = { ...p1, xp: Math.max(0, nonNegInt(p1.xp) - taken) }
+  return { data: withProfile(data, p), ok: true }
 }
 
 export function cleanName(name: unknown): string | null {
@@ -546,7 +614,9 @@ export function renameProfile(data: AppData, profileId: string, name: string): O
   const p = getProfile(data, profileId)
   if (!p) return fail(data, 'no-profile')
   const n = cleanName(name)
-  if (!n) return fail(data, 'invalid')
+  if (!n) return { ...fail(data, 'invalid'), message: 'Names need 1–20 letters.' }
+  // Two players with the same name would be mixed up (requests list, profile picker).
+  if (data.profiles.some((o) => o.id !== p.id && o.name.toLowerCase() === n.toLowerCase())) return fail(data, 'name-taken')
   return { data: withProfile(data, { ...p, name: n }), ok: true }
 }
 
@@ -623,14 +693,168 @@ export function setPin(data: AppData, pin: string): OpResult {
   return { data: withParent(data, { pin }), ok: true }
 }
 
+export const PIN_RESETS_KEPT = 10
+/** "Forgot the PIN?" without the recovery code: the new PIN can be set this long after asking. */
+export const PIN_RESET_WAIT_MS = DAY_MS
+/** After such a reset, approving rewards and gifting coins pause this long. */
+export const RESET_COOLDOWN_MS = DAY_MS
+
+function isTime(x: unknown): x is number {
+  return typeof x === 'number' && Number.isFinite(x) && x > 0
+}
+
+/** Every recorded "Forgot the PIN?" reset, oldest first (incl. the legacy single pinResetAt). */
+export function pinResetTimes(parent: ParentSettings): number[] {
+  const all = [...(Array.isArray(parent.pinResets) ? parent.pinResets : []), parent.pinResetAt].filter(isTime)
+  return Array.from(new Set(all)).sort((a, b) => a - b).slice(-PIN_RESETS_KEPT)
+}
+
+export function latestPinReset(parent: ParentSettings): number | undefined {
+  const t = pinResetTimes(parent)
+  return t.length ? t[t.length - 1] : undefined
+}
+
+/** Until when approvals/gifts are paused (0 = not paused). */
+export function resetCooldownUntil(parent: ParentSettings): number {
+  return isTime(parent.pinFallbackResetAt) ? parent.pinFallbackResetAt + RESET_COOLDOWN_MS : 0
+}
+
 /**
  * "Forgot the PIN?": replace it without the old one. There is no server, so
- * this can't be truly secure — instead it is recorded (pinResetAt) and the
- * parent zone shows when it happened.
+ * this can't be truly secure. Instead every reset is recorded (pinResets,
+ * add-only), the parent zone and the PIN pad show it, and a reset done with
+ * the grown-up question only (`fallback`, no recovery code) pauses approvals
+ * and gifts for a day.
  */
-export function resetPin(data: AppData, pin: string, now: number): OpResult {
+export function resetPin(data: AppData, pin: string, now: number, opts: { fallback?: boolean } = {}): OpResult {
   if (!isValidPin(pin)) return fail(data, 'invalid')
-  return { data: withParent(data, { pin, pinResetAt: now }), ok: true }
+  const pinResets = [...pinResetTimes(data.parent), now].slice(-PIN_RESETS_KEPT)
+  const patch: Partial<ParentSettings> = { pin, pinResetAt: now, pinResets }
+  if (opts.fallback) patch.pinFallbackResetAt = now
+  const out = withParent(data, patch)
+  delete out.parent.pinResetRequestedAt
+  return { data: out, ok: true }
+}
+
+/** "Forgot the PIN?" without the recovery code: start the 24-hour wait (keeps an earlier request). */
+export function requestPinReset(data: AppData, now: number): OpResult {
+  if (isTime(data.parent.pinResetRequestedAt) && data.parent.pinResetRequestedAt <= now + DAY_MS) return { data, ok: true }
+  return { data: withParent(data, { pinResetRequestedAt: now }), ok: true }
+}
+
+/** Parent (with the PIN) cancels a pending "Forgot the PIN?" request. */
+export function cancelPinResetRequest(data: AppData): OpResult {
+  if (data.parent.pinResetRequestedAt === undefined) return { data, ok: true }
+  const out = withParent(data, {})
+  delete out.parent.pinResetRequestedAt
+  return { data: out, ok: true }
+}
+
+/** When the waiting "Forgot the PIN?" request may set a new PIN (null = no request). */
+export function pinResetReadyAt(parent: ParentSettings): number | null {
+  return isTime(parent.pinResetRequestedAt) ? parent.pinResetRequestedAt + PIN_RESET_WAIT_MS : null
+}
+
+/** "That was me": hide the PIN-reset notices up to now. */
+export function ackPinReset(data: AppData, now: number): OpResult {
+  return { data: withParent(data, { pinResetAckAt: now }), ok: true }
+}
+
+/** Normalised recovery code (letters/digits, upper case). */
+export function cleanRecoveryCode(code: string): string {
+  return typeof code === 'string' ? code.toUpperCase().replace(/[^A-Z0-9]/g, '') : ''
+}
+
+/** One-way hash of a recovery code (FNV-1a twice, salted; plenty for a code that lives next to the PIN). */
+export function hashRecoveryCode(code: string): string {
+  const s = `opening-quest|${cleanRecoveryCode(code)}`
+  const fnv = (seed: number) => {
+    let h = seed >>> 0
+    for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0
+    return h.toString(36).padStart(7, '0')
+  }
+  return fnv(0x811c9dc5) + fnv(0x5bd1e995) + fnv(0x27d4eb2f)
+}
+
+export function recoveryCodeMatches(parent: ParentSettings, code: string): boolean {
+  const c = cleanRecoveryCode(code)
+  return !!parent.recoveryHash && c.length >= 8 && hashRecoveryCode(c) === parent.recoveryHash
+}
+
+export function setRecoveryHash(data: AppData, hash: string): OpResult {
+  if (typeof hash !== 'string' || !/^[0-9a-z]{8,64}$/.test(hash)) return fail(data, 'invalid')
+  return { data: withParent(data, { recoveryHash: hash }), ok: true }
+}
+
+/**
+ * Parent settings after importing a backup: the backup's rewards and training
+ * settings, but this DEVICE's PIN and recovery code (backups never carry them;
+ * a hand-made file must not be able to replace them), and the PIN-reset and
+ * clock records of BOTH merged (add-only), so restoring an old backup can't
+ * hide a reset.
+ */
+export function mergeParentOnImport(cur: ParentSettings, incoming: ParentSettings): ParentSettings {
+  const out: ParentSettings = { ...incoming, pin: cur.pin ?? incoming.pin }
+  delete out.recoveryHash
+  delete out.pinResetAckAt
+  delete out.pinResetRequestedAt
+  delete out.pinFallbackResetAt
+  delete out.lastSeenAt
+  delete out.clockJumps
+  if (cur.recoveryHash) out.recoveryHash = cur.recoveryHash
+  if (isTime(cur.pinResetAckAt)) out.pinResetAckAt = cur.pinResetAckAt
+  if (isTime(cur.pinResetRequestedAt)) out.pinResetRequestedAt = cur.pinResetRequestedAt
+  const resets = pinResetTimes({ ...cur, pinResets: [...pinResetTimes(cur), ...pinResetTimes(incoming)] })
+  delete out.pinResets
+  delete out.pinResetAt
+  if (resets.length) {
+    out.pinResets = resets
+    out.pinResetAt = resets[resets.length - 1]
+  }
+  const fallback = Math.max(isTime(cur.pinFallbackResetAt) ? cur.pinFallbackResetAt : 0, isTime(incoming.pinFallbackResetAt) ? incoming.pinFallbackResetAt : 0)
+  if (fallback > 0) out.pinFallbackResetAt = fallback
+  const seen = Math.max(isTime(cur.lastSeenAt) ? cur.lastSeenAt : 0, isTime(incoming.lastSeenAt) ? incoming.lastSeenAt : 0)
+  if (seen > 0) out.lastSeenAt = seen
+  const jumps = new Map<string, { from: number; to: number }>()
+  for (const j of [...(cur.clockJumps ?? []), ...(incoming.clockJumps ?? [])]) if (isTime(j?.from) && isTime(j?.to)) jumps.set(`${j.from}|${j.to}`, j)
+  if (jumps.size) out.clockJumps = [...jumps.values()].sort((a, b) => a.to - b.to).slice(-CLOCK_JUMPS_KEPT)
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// Device clock
+// ---------------------------------------------------------------------------
+
+export const CLOCK_JUMPS_KEPT = 10
+/** Moving the clock back more than this is recorded (daily limits rely on the clock). */
+export const CLOCK_BACK_MS = 60 * 60 * 1000
+const CLOCK_SEEN_STEP_MS = 10 * 60 * 1000
+
+/**
+ * Remember the latest device time and record the clock being turned BACK (by
+ * more than an hour) — the daily coin limits and the 60-minute repeat rule
+ * trust the clock, so the parent zone shows such jumps. (A jump forward can't
+ * be told apart from not using the app for a while, so it isn't recorded.)
+ * Identity-preserving; writes at most every 10 minutes.
+ */
+export function trackClock(data: AppData, now: number): AppData {
+  if (!isTime(now)) return data
+  const last = data.parent.lastSeenAt
+  if (!isTime(last)) return withParent(data, { lastSeenAt: now })
+  if (now < last - CLOCK_BACK_MS) {
+    const clockJumps = [...(data.parent.clockJumps ?? []), { from: last, to: now }].slice(-CLOCK_JUMPS_KEPT)
+    return withParent(data, { lastSeenAt: now, clockJumps })
+  }
+  if (now > last + CLOCK_SEEN_STEP_MS) return withParent(data, { lastSeenAt: now })
+  return data
+}
+
+/** Parent dismisses the clock warnings. */
+export function clearClockJumps(data: AppData): AppData {
+  if (!data.parent.clockJumps) return data
+  const out = withParent(data, {})
+  delete out.parent.clockJumps
+  return out
 }
 
 function cleanReward(raw: Partial<RewardDef>, id: string): RewardDef | null {
@@ -702,10 +926,20 @@ export function setDailyGoal(data: AppData, n: number): OpResult {
 
 export const MAX_STUDY_PGN_CHARS = 4_000_000
 
+/** Lichess chapter ids ([ChapterURL] last segment) found in a study PGN. */
+export function studyChapterIds(pgn: string): string[] {
+  const out = new Set<string>()
+  for (const m of pgn.matchAll(/\[ChapterURL\s+"[^"]*\/([A-Za-z0-9_-]+)\/?(?:[?#][^"]*)?"\]/g)) out.add(m[1])
+  return [...out]
+}
+
 export function importStudyPgn(data: AppData, text: string, name: string, now: number): OpResult {
   if (typeof text !== 'string') return fail(data, 'invalid')
   const pgn = text.replace(/^﻿/, '')
   if (!pgn.trim() || pgn.length > MAX_STUDY_PGN_CHARS || !/\[\w+\s+"/.test(pgn)) return fail(data, 'invalid')
+  // Without any of the coach's chapters every opening would end up with 0 lines.
+  const known = new Set(OPENINGS.flatMap((o) => [...o.chapters, ...o.extraChapters].map((c) => c.id)))
+  if (!studyChapterIds(pgn).some((id) => known.has(id))) return fail(data, 'no-chapters')
   const label = typeof name === 'string' && name.trim() ? name.trim().slice(0, 80) : 'Imported study'
   return { data: { ...data, studyOverride: { pgn, importedAt: now, name: label } }, ok: true }
 }

@@ -117,10 +117,9 @@ for (const [label, reps] of [
             s = opp(s, ctx)
             const last = s.history[s.history.length - 1]
             assert.equal(last.by, 'opponent')
-            if (isBlunder(line.moves[s.ply - 1])) {
-              assert.equal(s.feedback?.kind, 'opponent-blunder')
-              sawBlunder = true
-            }
+            // A move marked ?/?? here OR in another chapter (same position + move) is a blunder.
+            if (isBlunder(line.moves[s.ply - 1])) assert.equal(s.feedback?.kind, 'opponent-blunder')
+            if (s.feedback?.kind === 'opponent-blunder') sawBlunder = true
           } else {
             const e = expectedNode(s)!
             assert.equal(e, line.moves[s.ply])
@@ -340,8 +339,11 @@ test('known-bad: a real dubious user move from the study (London 9.Bd3??, vs-d4 
     assert.equal(r.phase, 'wrongMove')
     assert.equal(r.feedback?.kind, 'known-bad')
     assert.equal(r.feedback?.node, hit.node)
-    assert.ok(r.feedback?.refutation, 'refutation present')
-    assert.equal(r.feedback?.refutation?.parentId, hit.node.id)
+    // The study's answer (red arrow) only for a real mistake ?/??, not for a dubious ?! (review: chess #5).
+    if (isBlunder(hit.node)) {
+      assert.ok(r.feedback?.refutation, 'refutation present')
+      assert.equal(r.feedback?.refutation?.parentId, hit.node.id)
+    } else assert.equal(r.feedback?.refutation, undefined)
     assert.equal(r.wrong?.nodeId, hit.node.id)
     assert.equal(r.mistakes, 1)
     assert.equal(r.mistakesHere, 1)
@@ -355,7 +357,7 @@ test('known-bad: a real dubious user move from the study (London 9.Bd3??, vs-d4 
       `       ${rep.opening.id}: ${hit.node.moveNumber}${hit.node.color === 'w' ? '.' : '...'}${hit.node.san} (nags ${hit.node.nags}) refuted by ${r.feedback?.refutation?.san} in line "${hit.line.name}"`,
     )
   }
-  assert.equal(found, 2, 'London and vs-d4 each have a reachable dubious user move')
+  assert.equal(found, 3, 'Sicilian (7...Bxf3?, an override), London and vs-d4 each have a reachable dubious user move')
   // also in random mode
   const rep = reps30[1]
   const hit = findAlt(rep, (n) => isDubious(n))!
@@ -551,9 +553,10 @@ test('synthetic: known-bad 2...c5?! with refutation 3.cxd5; opponent blunder 4.B
   let s = drive(initTrainer(A, cfg(syn, 'inorder'), ctx), ctx, (st) => st.ply >= 3).s
   const r = play(s, ctx, 'c7', 'c5')
   assert.equal(r.feedback?.kind, 'known-bad')
-  assert.equal(r.feedback?.refutation?.san, 'cxd5')
-  assert.equal(r.feedback?.refutation?.comment, undefined)
-  assert.deepEqual(r.feedback?.refutation?.arrows, [{ from: 'd1', to: 'a4', color: 'green' }])
+  // ?! is only dubious: no "your opponent can answer…" refutation / red arrow (review: chess #5)
+  assert.equal(r.feedback?.refutation, undefined)
+  assert.equal(r.feedback?.node?.children[0]?.san, 'cxd5')
+  assert.deepEqual(r.feedback?.node?.children[0]?.arrows, [{ from: 'd1', to: 'a4', color: 'green' }])
   assert.equal(r.feedback?.node?.comment, 'too sharp')
   s = trainerReducer(r, { type: 'takeBack' })
   const { s: done, log } = drive(s, ctx)
@@ -825,6 +828,71 @@ test('random-mode fuzz (maxPly 0, all extras): history.length === ply, board on 
     }
   }
   console.log(`       ${games} fuzzed games`)
+})
+
+// ---------------------------------------------------------------------------
+console.log('Review fixes: overrides by transposition, tails, blunders in any chapter')
+
+test('random mode: 7...Bxf3? reached by the other move order is known-bad, not "also in your study" (chess #1)', () => {
+  const rep = reps30[0]
+  // Alapin main line: 4.Nf3 Bg4 5.Be2 Nf6 6.d4 e6 7.c4 (7...Qd7 is the move).
+  const line = rep.lines.find((l) => l.moves.map((m) => m.san).join(' ').startsWith('e4 c5 c3 d5 exd5 Qxd5 Nf3 Bg4 Be2 Nf6 d4 e6 c4 Qd7'))
+  assert.ok(line, 'Alapin 7.c4 Qd7 line')
+  const ply = line!.moves.findIndex((m) => m.san === 'Qd7')
+  const { s, ctx } = reach(rep, line!, ply, 'random')
+  const r = play(s, ctx, 'g4', 'f3')
+  assert.equal(r.feedback?.kind, 'known-bad')
+  assert.equal(r.phase, 'wrongMove')
+  assert.equal(r.feedback?.refutation?.san, 'cxd5')
+})
+
+test('tail: after the last user move the study\'s reply / trap demo plays; ids and counts unchanged (chess #2, #5)', () => {
+  let tails = 0
+  for (const rep of reps30) {
+    const ctx = ctxOf(rep)
+    for (const line of rep.lines) {
+      if (!line.tail) continue
+      tails++
+      const { s } = drive(initTrainer(line, cfg(rep, 'inorder'), ctx), ctx)
+      assert.equal(s.phase, 'complete')
+      assert.equal(s.tailPly, 0)
+      let t = s
+      for (let k = 0; k < line.tail.length; k++) {
+        t = trainerReducer(t, { type: 'tailMove' })
+        assert.equal(t.tailPly, k + 1)
+        assert.equal(t.phase, 'complete')
+        assert.equal(t.fen, line.tail[k].fen)
+        assert.equal(t.history.length, t.ply + t.tailPly)
+        assert.equal(t.history[t.history.length - 1].by, line.tail[k].color === userColorOf(rep.opening) ? 'user' : 'opponent')
+      }
+      assert.equal(trainerReducer(t, { type: 'tailMove' }), t, 'nothing after the tail')
+      // counts and marks are about the line only
+      assert.equal(t.userMoveMarks.length, line.userMoveCount)
+      assert.equal(t.mistakes, 0)
+      // restart clears it
+      assert.equal(trainerReducer(t, { type: 'restart' }).tailPly, 0)
+    }
+    // tailMove does nothing before the line is complete
+    const l0 = rep.lines.find((l) => l.tail)!
+    const s0 = initTrainer(l0, cfg(rep, 'inorder'), ctx)
+    assert.equal(trainerReducer(s0, { type: 'tailMove' }), s0)
+  }
+  assert.ok(tails > 20, `${tails} lines with a tail`)
+})
+
+test('opponent blunder marked in another chapter counts here too (chess #7)', () => {
+  const rep = reps30[1] // London: 4...Qb6? is marked in "All the variations", not in "Against ...c5"
+  const keys = new Set<string>()
+  for (const n of rep.nodesById.values()) if (isBlunder(n)) keys.add(`${positionKey(n.fenBefore)}|${n.uci}`)
+  const hit = rep.lines.find((l) =>
+    l.moves.some((m) => m.color === 'b' && !isBlunder(m) && keys.has(`${positionKey(m.fenBefore)}|${m.uci}`)),
+  )
+  assert.ok(hit, 'a line with an opponent move marked only elsewhere')
+  assert.equal(hit!.hasOpponentBlunder, true)
+  const ctx = ctxOf(rep, prefer(hit!.id))
+  const { s, log } = drive(initTrainer(hit!, cfg(rep, 'inorder'), ctx), ctx)
+  assert.ok(log.includes('opponent-blunder'))
+  assert.equal(s.opponentBlundered, true)
 })
 
 if (trainerWarnings.length) {

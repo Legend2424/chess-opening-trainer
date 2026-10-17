@@ -10,27 +10,32 @@ permissions:
   pages: write
   id-token: write
 
+# One deploy at a time; a newer push waits instead of cancelling a deploy
+# that is already half-published.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          # The test scripts are plain .ts run by node (type stripping: Node 22.18+).
+          node-version: 24
           cache: npm
       - run: npm ci
+      - name: Test
+        run: npm test
       - name: Build
         run: npm run build
         env:
           # Project Pages live at https://<user>.github.io/<repo>/ , so the app
           # must be built with that sub-path as its base. Resolved automatically.
           DEPLOY_BASE: /${{ github.event.repository.name }}/
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: dist
 

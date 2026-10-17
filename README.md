@@ -37,12 +37,31 @@ npm install
 npm run dev          # http://localhost:5174 (via .claude/launch.json) or vite's default port
 npm run build        # typecheck + production build into dist/
 node scripts/test-repertoire.ts   # parse the study and print line statistics
+npm test             # all six test scripts (needs Node 22.18+ for .ts)
 ```
 
+Corrections on top of the coach's study (moves the engine shows are mistakes, contrast notes that
+should not be drilled) live in `src/data/studyOverrides.ts`.
+
 See `DESIGN.md` for the full spec (trainer rules, rewards, shop catalogue, architecture).
+
+## Deploying (GitHub Pages)
+
+1. Create the GitHub repo `Legend2424/chess-opening-trainer` and push `main`.
+2. In the repo: *Settings → Pages → Source: GitHub Actions*. Every push to `main` then runs the
+   tests, builds with the right sub-path and publishes (`.github/workflows/deploy.yml`).
+3. Try the Pages build locally first: `npm run build:pages && npx vite preview --base=/chess-opening-trainer/`.
+   In Git Bash, don't pass a path like `DEPLOY_BASE=/chess-opening-trainer/` yourself: MSYS rewrites it to
+   `C:/Program Files/Git/...` (use `npm run build:pages`, or prefix the command with `MSYS_NO_PATHCONV=1`).
 
 ## Saving progress
 
 Progress, coins and purchases are stored on each device (browser storage). On iPad, use
 **Share → Add to Home Screen** so Safari never clears it, and use *Parent zone → Backup* now and
-then to export a backup file.
+then to export a backup file. Note: the Home Screen app has its **own, separate storage** — progress
+made in a Safari tab does not show up there. Export a backup in Safari first and import it in the
+Home Screen app (the Parent zone's Data tab walks you through it).
+
+When the first parent PIN is created, the app shows a **recovery code** once: write it down. With it a
+forgotten PIN can be replaced right away; without it "Forgot the PIN?" makes you wait 24 hours (so the
+kids can't simply change it).

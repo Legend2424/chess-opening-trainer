@@ -1,6 +1,6 @@
 // Hoot's lines for the trainer: kind, short, varied. Pure helpers.
-import type { Line, MoveNode } from '../../types.ts'
-import { moveLabel } from '../../chess/repertoire.ts'
+import type { Line, MoveNode, Repertoire } from '../../types.ts'
+import { isBlunder, moveLabel, positionKey } from '../../chess/repertoire.ts'
 import type { TrainerState } from '../../trainer/trainerReducer.ts'
 import type { MistakeVerdict } from '../../engine/engineService.ts'
 
@@ -59,6 +59,61 @@ export function recentNotes(state: TrainerState): CoachNote[] {
   return out
 }
 
+/** Coach comments of the tail moves shown so far (after the line is complete). */
+export function tailNotes(state: TrainerState): CoachNote[] {
+  const out: CoachNote[] = []
+  const tail = state.line.tail ?? []
+  for (let i = 0; i < state.tailPly && i < tail.length; i++) {
+    const n = tail[i]
+    if (n.comment) out.push({ id: n.id, label: moveLabel(n), text: n.comment })
+  }
+  return out
+}
+
+export interface OpeningNorms {
+  /** The opponent's most common first move (when the opponent moves first), e.g. 1.e4 in the Sicilian. */
+  firstOpponent: MoveNode | null
+  /** Per position (positionKey): the kid's most common FIRST move of a line from there. */
+  firstUser: Map<string, MoveNode>
+}
+
+const normsCache = new WeakMap<Repertoire, OpeningNorms>()
+
+/** How the opening's lines usually start (majority by number of lines). Cached per repertoire. */
+export function openingNorms(rep: Repertoire): OpeningNorms {
+  const hit = normsCache.get(rep)
+  if (hit) return hit
+  const u = rep.opening.side === 'white' ? 'w' : 'b'
+  const opp = new Map<string, { node: MoveNode; n: number }>()
+  const user = new Map<string, Map<string, { node: MoveNode; n: number }>>()
+  for (const l of rep.lines) {
+    const first = l.moves[0]
+    if (first && first.color !== u) {
+      const e = opp.get(first.uci)
+      if (e) e.n++
+      else opp.set(first.uci, { node: first, n: 1 })
+    }
+    const fu = l.moves.find((m) => m.color === u)
+    if (fu) {
+      const key = positionKey(fu.fenBefore)
+      let m = user.get(key)
+      if (!m) user.set(key, (m = new Map()))
+      const e = m.get(fu.uci)
+      if (e) e.n++
+      else m.set(fu.uci, { node: fu, n: 1 })
+    }
+  }
+  const top = (m: Map<string, { node: MoveNode; n: number }>) => [...m.values()].sort((a, b) => b.n - a.n)[0]?.node ?? null
+  const firstUser = new Map<string, MoveNode>()
+  for (const [k, m] of user) {
+    const t = top(m)
+    if (t) firstUser.set(k, t)
+  }
+  const out: OpeningNorms = { firstOpponent: top(opp), firstUser }
+  normsCache.set(rep, out)
+  return out
+}
+
 /** The opponent's move just played (if the last move was theirs). */
 export function lastOpponentMove(state: TrainerState): MoveNode | null {
   const n = state.ply > 0 ? state.line.moves[state.ply - 1] : undefined
@@ -69,7 +124,8 @@ const NUMBERED = /^(\d+)(\.\.\.|\.)(.+)$/
 
 /**
  * The line name with the user's not-yet-played moves hidden ("4.c4 Qd6" ->
- * "4.? Qd6" for White), so the name never gives the answer away.
+ * "4.? Qd6" for White), so the name never gives the answer away. An opponent
+ * blunder still to come is hidden too (it would spoil "punish the blunder").
  */
 export function displayLineName(line: Line, ply: number, revealAll: boolean, userColor: 'w' | 'b'): string {
   if (revealAll || !line.name || line.name === 'Main line') return line.name || 'Main line'
@@ -99,7 +155,8 @@ export function displayLineName(line: Line, ply: number, revealAll: boolean, use
       prevColor = color
       const idx = line.moves.findIndex((n, i) => i >= searchFrom && n.moveNumber === num && n.color === color && n.san === san)
       if (idx >= 0) searchFrom = idx + 1
-      const hidden = color === userColor && (idx < 0 || idx >= ply)
+      const hidden =
+        (color === userColor && (idx < 0 || idx >= ply)) || (color !== userColor && idx >= ply && isBlunder(line.moves[idx]))
       if (!hidden) return tok
       // Always numbered, so a hidden move never reads like a "?" annotation.
       return `${num}${color === 'w' ? '.' : '...'}?`

@@ -5,6 +5,7 @@ import { Chess } from 'chess.js'
 import type { Chapter, ChapterRef, Line, MoveNode, OpeningDef, Repertoire } from '../types.ts'
 import type { PgnGame, PgnNode } from './pgn.ts'
 import { combineComments } from './pgn.ts'
+import { STUDY_OVERRIDES, type StudyOverride } from '../data/studyOverrides.ts'
 
 export const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 
@@ -13,6 +14,8 @@ export interface BuildOptions {
   maxPly: number
   /** Extra chapter ids (from OpeningDef.extraChapters) to include. */
   enabledExtras: string[]
+  /** Corrections on top of the study (default: src/data/studyOverrides.ts; [] = none). */
+  overrides?: StudyOverride[]
 }
 
 /** First 4 FEN fields (placement, side, castling, en passant) — ignores move counters. */
@@ -383,12 +386,83 @@ function buildChapter(
   return { chapter, info }
 }
 
+// ---------------------------------------------------------------------------
+// Study overrides (src/data/studyOverrides.ts)
+// ---------------------------------------------------------------------------
+
+/** SAN without check/mate signs and !/? glyphs, for path matching. */
+function sanKey(san: string): string {
+  return san.replace(/[+#!?]+$/g, '').replace(/[+#]/g, '')
+}
+
+function splitPath(path: string): string[] {
+  return path
+    .trim()
+    .split(/\s+/)
+    .filter((t) => t && !/^\d+\.+$/.test(t))
+    .map((t) => sanKey(t.replace(/^\d+\.+/, '')))
+}
+
+function clonePgn(list: PgnNode[]): PgnNode[] {
+  return list.map((n) => ({ san: n.san, comments: n.comments.slice(), nags: n.nags.slice(), children: clonePgn(n.children) }))
+}
+
+/** Walks `path` down a PGN tree; returns the list holding the last node and its index. */
+function findPgn(roots: PgnNode[], path: string[]): { list: PgnNode[]; index: number } | null {
+  let list = roots
+  for (let k = 0; k < path.length; k++) {
+    const i = list.findIndex((n) => sanKey(n.san) === path[k])
+    if (i < 0) return null
+    if (k === path.length - 1) return { list, index: i }
+    list = list[i].children
+  }
+  return null
+}
+
+/** Tree edits (cut, refutation reply) on a COPY of the chapter's PGN game. */
+function applyTreeOverrides(game: PgnGame, chapterId: string, overrides: StudyOverride[], warn: (m: string) => void): PgnGame {
+  const mine = overrides.filter((o) => o.chapterId === chapterId && (o.action === 'cut' || (o.action === 'nag' && o.reply)))
+  if (mine.length === 0) return game
+  const roots = clonePgn(game.roots)
+  // Cuts last, so a reply/nag deeper in a cut subtree never warns needlessly.
+  for (const o of [...mine.filter((x) => x.action !== 'cut'), ...mine.filter((x) => x.action === 'cut')]) {
+    const hit = findPgn(roots, splitPath(o.path))
+    if (!hit) {
+      warn(`[repertoire] override not applied (path not in chapter ${chapterId}): ${o.path}`)
+      continue
+    }
+    const node = hit.list[hit.index]
+    if (o.action === 'cut') {
+      hit.list.splice(hit.index, 1)
+      continue
+    }
+    const reply = sanKey(o.reply ?? '')
+    const j = node.children.findIndex((c) => sanKey(c.san) === reply)
+    if (j > 0) node.children.unshift(...node.children.splice(j, 1))
+    else if (j < 0) node.children.unshift({ san: o.reply ?? '', comments: [], nags: [], children: [] })
+  }
+  return { ...game, roots }
+}
+
+/** Finds a built node by SAN path from the chapter start. */
+function findNode(roots: MoveNode[], path: string[]): MoveNode | null {
+  let list = roots
+  let node: MoveNode | null = null
+  for (const san of path) {
+    node = list.find((n) => sanKey(n.san) === san) ?? null
+    if (!node) return null
+    list = node.children
+  }
+  return node
+}
+
 /**
  * Builds the repertoire for one opening. Never throws on bad study data:
  * unplayable SAN skips that branch (console.warn), missing chapters are skipped.
  */
 export function buildRepertoire(def: OpeningDef, games: PgnGame[], opts: BuildOptions): Repertoire {
   const warn = (msg: string) => console.warn(msg)
+  const overrides = opts.overrides ?? STUDY_OVERRIDES
   const byId = new Map<string, PgnGame>()
   for (const g of games) {
     const cid = chapterIdOf(g)
@@ -417,21 +491,51 @@ export function buildRepertoire(def: OpeningDef, games: PgnGame[], opts: BuildOp
       warn(`[repertoire] ${def.id}: chapter ${ref.id} (${ref.title}) not found in study; skipped`)
       continue
     }
-    const b = buildChapter(ref, game, isExtra, chess, stepper, counters, warn)
+    const b = buildChapter(ref, applyTreeOverrides(game, ref.id, overrides, warn), isExtra, chess, stepper, counters, warn)
     if (!b) continue
     chapters.push(b.chapter)
     builds.push(b)
+  }
+
+  // ---- overrides on the built trees: annotations + comments ----------------
+  // A nag goes onto EVERY node with the same position + move (all chapters),
+  // so the same move reached by another move order is marked too.
+  const nagByKey = new Map<string, number>()
+  for (const o of overrides) {
+    if (o.action !== 'nag' && o.action !== 'comment') continue
+    const b = builds.find((x) => x.chapter.id === o.chapterId)
+    if (!b) continue // chapter not in this opening (or switched off)
+    const node = findNode(b.chapter.roots, splitPath(o.path))
+    if (!node) {
+      warn(`[repertoire] override not applied (path not in chapter ${o.chapterId}): ${o.path}`)
+      continue
+    }
+    if (o.action === 'comment') {
+      if (o.text) node.comment = o.text
+      else delete node.comment
+    } else if (o.nag) nagByKey.set(`${positionKey(node.fenBefore)}|${node.uci}`, o.nag)
+  }
+  if (nagByKey.size > 0) {
+    for (const b of builds) {
+      for (const node of b.info.keys()) {
+        const nag = nagByKey.get(`${positionKey(node.fenBefore)}|${node.uci}`)
+        if (nag !== undefined && !node.nags.includes(nag)) node.nags.push(nag)
+      }
+    }
   }
 
   // ---- nodesById + movesByPosition --------------------------------------
   const nodesById = new Map<string, MoveNode>()
   const allInfo = new Map<MoveNode, WalkInfo>()
   const byPos = new Map<string, Map<string, MoveNode>>()
+  /** position|uci of every move marked ?/?? in ANY chapter (opponent traps transpose too). */
+  const blunderKeys = new Set<string>()
   for (const b of builds) {
     for (const [node, inf] of b.info) {
       nodesById.set(node.id, node)
       allInfo.set(node, inf)
       const key = positionKey(node.fenBefore)
+      if (isBlunder(node)) blunderKeys.add(`${key}|${node.uci}`)
       let m = byPos.get(key)
       if (!m) byPos.set(key, (m = new Map()))
       const prev = m.get(node.uci)
@@ -445,48 +549,121 @@ export function buildRepertoire(def: OpeningDef, games: PgnGame[], opts: BuildOp
   }
 
   // ---- lines ---------------------------------------------------------------
-  const lines: Line[] = []
-  const usedIds = new Set<string>()
-  for (const b of builds) {
+  interface Candidate {
+    b: ChapterBuild
+    rank: number
+    moves: MoveNode[]
+    tail?: MoveNode[]
+    trap: boolean
+  }
+  const perChapter: Candidate[][] = []
+  builds.forEach((b, rank) => {
     const ch = b.chapter
-    const raw: MoveNode[][] = []
-    // 1+2: every root→leaf path, stopping before a dubious user move.
+    // 1+2: every root→leaf path, stopping before a dubious user move (`stop`).
+    const raw: Array<{ path: MoveNode[]; stop?: MoveNode }> = []
     const path: MoveNode[] = []
     const dfs = (nodes: MoveNode[]) => {
       for (const node of nodes) {
         if (node.color === userColor && isDubious(node)) {
-          raw.push(path.slice())
+          raw.push({ path: path.slice(), stop: node })
           continue
         }
         path.push(node)
-        if (node.children.length === 0) raw.push(path.slice())
+        if (node.children.length === 0) raw.push({ path: path.slice() })
         else dfs(node.children)
         path.pop()
       }
     }
     dfs(ch.roots)
 
-    // 3+4: truncate, trim trailing opponent moves.
-    const cut: MoveNode[][] = []
-    for (const p of raw) {
+    // 3+4: truncate, trim trailing opponent moves. What was trimmed becomes the
+    // line's "tail", shown after the line is complete: the opponent's reply the
+    // study ends with, or — when the path stopped before a ?/?? move by the kid's
+    // side — a trap demo (that move and its refutation). Not when the cap cut
+    // the line (then the rest is just more theory).
+    const cut: Candidate[] = []
+    for (const { path: p, stop } of raw) {
       let moves = maxPly > 0 && p.length > maxPly ? p.slice(0, maxPly) : p
       let end = moves.length
       while (end > 0 && moves[end - 1].color !== userColor) end--
       if (end === 0) continue
       if (end < moves.length) moves = moves.slice(0, end)
-      cut.push(moves)
+      const rest = p.slice(moves.length)
+      let tail: MoveNode[] | undefined
+      let trap = false
+      if (rest.every((n) => n.color !== userColor)) {
+        if (stop) {
+          if (isBlunder(stop)) {
+            tail = [...rest, stop]
+            if (stop.children[0]) tail.push(stop.children[0])
+            trap = true
+          }
+        } else if (rest.length > 0) tail = rest
+      }
+      cut.push({ b, rank, moves, tail, trap })
     }
 
-    // 5: dedupe identical uci paths; drop strict prefixes of other lines.
+    // 5: dedupe identical uci paths; drop strict prefixes of other lines. When
+    // two raw paths collapse into one line, the first (main-line-most) wins.
     const canonOf = (n: MoveNode) => b.info.get(n)!.canon
     const hasLonger = new Set<number>() // canon ids that are a strict prefix of some line
-    for (const moves of cut) for (let k = 0; k < moves.length - 1; k++) hasLonger.add(canonOf(moves[k]))
+    for (const c of cut) for (let k = 0; k < c.moves.length - 1; k++) hasLonger.add(canonOf(c.moves[k]))
     const seen = new Set<number>()
-    let indexInChapter = 0
-    for (const moves of cut) {
-      const last = canonOf(moves[moves.length - 1])
+    const kept: Candidate[] = []
+    for (const c of cut) {
+      const last = canonOf(c.moves[c.moves.length - 1])
       if (seen.has(last) || hasLonger.has(last)) continue
       seen.add(last)
+      kept.push(c)
+    }
+    perChapter.push(kept)
+  })
+
+  // 5b: the same across chapters (same start position + moves): a line that
+  // repeats an earlier chapter's line, or is a strict prefix of another
+  // chapter's line, is dropped. A core line is never dropped because of an
+  // EXTRA chapter, so switching extras on/off never changes the core lines.
+  interface TrieNode {
+    kids: Map<string, TrieNode>
+    ends: Candidate[]
+    /** Chapters with a line that goes on past this node. */
+    deeper: Array<{ chapterId: string; isExtra: boolean }>
+  }
+  const trieRoots = new Map<string, TrieNode>()
+  const newTrie = (): TrieNode => ({ kids: new Map(), ends: [], deeper: [] })
+  const endNode = new Map<Candidate, TrieNode>()
+  for (const list of perChapter) {
+    for (const c of list) {
+      const startKey = positionKey(c.b.chapter.startFen)
+      let node = trieRoots.get(startKey)
+      if (!node) trieRoots.set(startKey, (node = newTrie()))
+      for (let k = 0; k < c.moves.length; k++) {
+        if (k > 0 && !node.deeper.some((d) => d.chapterId === c.b.chapter.id)) {
+          node.deeper.push({ chapterId: c.b.chapter.id, isExtra: c.b.chapter.isExtra })
+        }
+        let next = node.kids.get(c.moves[k].uci)
+        if (!next) node.kids.set(c.moves[k].uci, (next = newTrie()))
+        node = next
+      }
+      node.ends.push(c)
+      endNode.set(c, node)
+    }
+  }
+  const crossDropped = (c: Candidate): boolean => {
+    const node = endNode.get(c)!
+    const ch = c.b.chapter
+    if (node.deeper.some((d) => d.chapterId !== ch.id && (!d.isExtra || ch.isExtra))) return true
+    return node.ends.some((o) => o !== c && o.b.chapter.id !== ch.id && o.rank < c.rank)
+  }
+
+  const lines: Line[] = []
+  const usedIds = new Set<string>()
+  for (const list of perChapter) {
+    let indexInChapter = 0
+    for (const c of list) {
+      if (crossDropped(c)) continue
+      const { b, moves } = c
+      const ch = b.chapter
       // 6: name — where the line leaves the chapter main line, plus (if
       // different) the last place it picks a side variation, so sibling lines
       // read differently: "4.c4 Qd6", "4.c4 … 9...Nbd7".
@@ -504,7 +681,7 @@ export function buildRepertoire(def: OpeningDef, games: PgnGame[], opts: BuildOp
         }
         if (lastBranch > 0) name += ` … ${movesLabel(moves.slice(lastBranch, lastBranch + 1))}`
       }
-      // 7: id
+      // 7: id (the tail is NOT part of it, so ids and progress stay stable)
       const hashInput = `${def.id}|${ch.id}|${moves.map((n) => n.uci).join(' ')}`
       let id = stableHash(hashInput)
       if (usedIds.has(id)) {
@@ -517,9 +694,9 @@ export function buildRepertoire(def: OpeningDef, games: PgnGame[], opts: BuildOp
       let hasOpponentBlunder = false
       for (const n of moves) {
         if (n.color === userColor) userMoveCount++
-        else if (isBlunder(n)) hasOpponentBlunder = true
+        else if (blunderKeys.has(`${positionKey(n.fenBefore)}|${n.uci}`)) hasOpponentBlunder = true
       }
-      lines.push({
+      const line: Line = {
         id,
         openingId: def.id,
         chapterId: ch.id,
@@ -531,7 +708,12 @@ export function buildRepertoire(def: OpeningDef, games: PgnGame[], opts: BuildOp
         moves,
         userMoveCount,
         hasOpponentBlunder,
-      })
+      }
+      if (c.tail && c.tail.length > 0) {
+        line.tail = c.tail
+        if (c.trap) line.tailIsTrap = true
+      }
+      lines.push(line)
     }
   }
 

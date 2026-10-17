@@ -51,9 +51,10 @@ export interface TrainerConfig {
  * several MB (≈3.3 MB worst case: Smith-Morra at maxPly 0). To resume a session, persist
  * `{ lineId: state.line.id, mode: state.config.mode }` and re-init from the repertoire.
  *
- * Invariants: `history.length === ply` (outside 'wrongMove' the board `fen` is the position after
- * `line.moves[ply - 1]`), and in random mode every candidate line shares `line.startFen` and has
- * the played position at the same ply.
+ * Invariants: `history.length === ply + tailPly` (outside 'wrongMove' the board `fen` is the
+ * position after `line.moves[ply - 1]`, or after `line.tail[tailPly - 1]` once the tail is being
+ * shown), and in random mode every candidate line shares `line.startFen` and has the played
+ * position at the same ply.
  */
 export interface TrainerState {
   config: TrainerConfig
@@ -91,6 +92,8 @@ export interface TrainerState {
   feedbackSeq: number
   /** Random mode: candidate ids at the start of the line (used by 'restart', which has no ctx). */
   startCandidates: string[]
+  /** After 'complete': how many moves of `line.tail` ("what happens next" / trap demo) are on the board. */
+  tailPly: number
 }
 
 export interface TrainerContext {
@@ -105,6 +108,8 @@ export type TrainerAction =
   | { type: 'takeBack' }
   | { type: 'hint' }
   | { type: 'restart' }
+  /** After the line is complete: show the next move of `line.tail` (auto-played by the hook). */
+  | { type: 'tailMove' }
 
 // ---------------------------------------------------------------------------
 // Per-repertoire lookup caches (repertoires are immutable once built)
@@ -175,6 +180,7 @@ function fresh(line: Line, config: TrainerConfig, startCandidates: string[], fee
     hintsHere: 0,
     feedbackSeq,
     startCandidates,
+    tailPly: 0,
   }
 }
 
@@ -311,6 +317,17 @@ export function currentNode(state: TrainerState): MoveNode | null {
   return state.ply > 0 ? (state.line.moves[state.ply - 1] ?? null) : null
 }
 
+/** The study node shown last on the board: a tail move once the tail plays, else currentNode. */
+export function shownNode(state: TrainerState): MoveNode | null {
+  if (state.tailPly > 0) return state.line.tail?.[state.tailPly - 1] ?? currentNode(state)
+  return currentNode(state)
+}
+
+/** The line's tail still has moves to show (only after the line is complete). */
+export function tailPending(state: TrainerState): boolean {
+  return state.phase === 'complete' && !!state.line.tail && state.tailPly < state.line.tail.length
+}
+
 /** Which user move (0-based) is next == number of user moves already played in `line`. */
 export function userMoveIndex(state: TrainerState): number {
   return countUserMoves(state.line, state.config.userColor, state.ply)
@@ -326,6 +343,8 @@ export function trainerReducer(state: TrainerState, action: TrainerAction): Trai
       return takeBack(state)
     case 'hint':
       return hint(state)
+    case 'tailMove':
+      return tailMove(state)
     case 'restart': {
       // startCandidates = every line sharing the start position of the line we began with. If the
       // current line is not among them (should not happen: retargets keep the start position), it
@@ -381,7 +400,8 @@ function opponentMove(state: TrainerState, ctx: TrainerContext): TrainerState {
           .map((l) => l.id)
       : s.candidates
   if (s.config.mode === 'random' && !candidates.includes(s.line.id)) candidates.push(s.line.id)
-  const blunder = isBlunder(node)
+  // A move marked ?/?? in ANY chapter (same position) counts: the coach marks a trap once.
+  const blunder = isBlunder(node) || nodesFor(ctx.rep, node.fenBefore, node.uci).some(isBlunder)
   const fb = blunder ? feedback(s, 'opponent-blunder', node) : { feedback: null, feedbackSeq: s.feedbackSeq }
   return {
     ...s,
@@ -435,7 +455,8 @@ function userMove(state: TrainerState, from: string, to: string, promotion: stri
   // 3. A move the study marks as bad, or 4. any other move.
   const knownBad = book && isDubious(book) ? book : null
   let refutation: MoveNode | undefined
-  if (knownBad) {
+  // The study's answer is shown (red arrow) only for real mistakes (?/??), not for a dubious ?!.
+  if (knownBad && (isBlunder(knownBad) || all.some(isBlunder))) {
     refutation = knownBad.children[0]
     if (!refutation) {
       for (const n of all) {
@@ -455,6 +476,31 @@ function userMove(state: TrainerState, from: string, to: string, promotion: stri
     mistakes: state.mistakes + 1,
     mistakesHere: state.mistakesHere + 1,
     ...(knownBad ? feedback(state, 'known-bad', knownBad, refutation) : feedback(state, 'wrong', expected ?? undefined)),
+  }
+}
+
+function tailMove(state: TrainerState): TrainerState {
+  const tail = state.line.tail
+  if (state.phase !== 'complete' || !tail || state.tailPly >= tail.length) return state
+  const node = tail[state.tailPly]
+  // The tail continues the board position (a stale tail never desyncs the board).
+  if (positionKey(node.fenBefore) !== positionKey(state.fen)) return state
+  const m = tryMove(state.fen, node.from, node.to, node.promotion)
+  const played: PlayedMove = {
+    san: m ? m.san : node.san,
+    uci: node.uci,
+    from: node.from,
+    to: node.to,
+    fen: m ? m.fen : node.fen,
+    by: node.color === state.config.userColor ? 'user' : 'opponent',
+    nodeId: node.id,
+  }
+  return {
+    ...state,
+    tailPly: state.tailPly + 1,
+    fen: played.fen,
+    history: [...state.history, played],
+    lastMove: [played.from, played.to],
   }
 }
 

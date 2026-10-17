@@ -46,6 +46,10 @@ function check(rep: Repertoire, opts: BuildOptions, label: string): void {
   assert.equal(rep.nodesById.size, treeNodes.length, `${ctx}: nodesById size`)
   for (const n of treeNodes) assert.equal(rep.nodesById.get(n.id), n)
 
+  // A move marked ?/?? in ANY chapter (same position + move) makes it an opponent blunder everywhere.
+  const blunderKeys = new Set<string>()
+  for (const n of rep.nodesById.values()) if (isBlunder(n)) blunderKeys.add(`${positionKey(n.fenBefore)}|${n.uci}`)
+
   // lines
   const ids = new Set<string>()
   const byChapter = new Map<string, Line[]>()
@@ -71,8 +75,20 @@ function check(rep: Repertoire, opts: BuildOptions, label: string): void {
       if (m.color === u) {
         userMoves++
         assert.ok(!isDubious(m), `${ctx}: ${line.id} teaches dubious user move ${m.san}`)
-      } else if (isBlunder(m)) oppBlunder = true
+      } else if (blunderKeys.has(`${positionKey(m.fenBefore)}|${m.uci}`)) oppBlunder = true
     })
+    // tail: continues the line's last position; opponent moves, or a trap demo whose only
+    // kid-side move is a ?/?? (never counted as a user move)
+    if (line.tail) {
+      assert.ok(line.tail.length > 0, `${ctx}: empty tail`)
+      assert.equal(line.tail[0].fenBefore, moves[moves.length - 1].fen, `${ctx}: ${line.id} tail continues the line`)
+      for (let k = 1; k < line.tail.length; k++) assert.equal(line.tail[k].fenBefore, line.tail[k - 1].fen)
+      const kidMoves = line.tail.filter((m) => m.color === u)
+      if (line.tailIsTrap) {
+        assert.equal(kidMoves.length, 1, `${ctx}: ${line.id} trap tail`)
+        assert.ok(isBlunder(kidMoves[0]), `${ctx}: ${line.id} trap move is ?/??`)
+      } else assert.equal(kidMoves.length, 0, `${ctx}: ${line.id} tail has a kid move`)
+    }
     assert.equal(line.userMoveCount, userMoves)
     assert.equal(line.hasOpponentBlunder, oppBlunder)
     assert.ok(line.userMoveCount >= 1)
@@ -96,14 +112,35 @@ function check(rep: Repertoire, opts: BuildOptions, label: string): void {
     assert.ok(lines.filter((l) => l.name === 'Main line').length <= 1, `${ctx}: several "Main line" in ${cid}`)
   }
 
-  // coverage: every non-dubious user move reachable without a dubious user move (and within maxPly) is taught
-  const covered = (n: MoveNode, blocked: boolean): void => {
+  // across chapters (same start + moves): no duplicates, no strict prefixes — except that a CORE
+  // line may be a prefix of an EXTRA chapter's line (extras never change the core lines)
+  {
+    const coreIds = new Set(def.chapters.map((c) => c.id))
+    const keyOf = (l: Line) => `${positionKey(l.startFen)}|${l.moves.map((m) => m.uci).join(' ')}`
+    const all = rep.lines.map((l) => ({ l, k: keyOf(l) }))
+    const set = new Set(all.map((x) => x.k))
+    assert.equal(set.size, all.length, `${ctx}: same path in two chapters`)
+    for (const a of all)
+      for (const b of all)
+        if (a.l.chapterId !== b.l.chapterId && b.k.startsWith(a.k + ' '))
+          assert.ok(coreIds.has(a.l.chapterId) && !coreIds.has(b.l.chapterId), `${ctx}: ${a.l.id} is a prefix of ${b.l.id} (other chapter)`)
+  }
+
+  // coverage: every non-dubious user move reachable without a dubious user move (and within maxPly)
+  // is taught — in its own chapter, or by another chapter's line with the very same moves
+  const pathKeys = new Set<string>()
+  for (const l of rep.lines) {
+    let k = positionKey(l.startFen)
+    for (const m of l.moves) pathKeys.add((k += ` ${m.uci}`))
+  }
+  const covered = (n: MoveNode, blocked: boolean, key: string): void => {
     const isUser = n.color === u
     const nowBlocked = blocked || (isUser && isDubious(n)) || (opts.maxPly > 0 && n.ply > opts.maxPly)
-    if (isUser && !nowBlocked) assert.ok(rep.linesByNode.get(n.id)?.length, `${ctx}: user move ${n.id} ${n.san} not in any line`)
-    for (const c of n.children) covered(c, nowBlocked)
+    const k = `${key} ${n.uci}`
+    if (isUser && !nowBlocked) assert.ok(rep.linesByNode.get(n.id)?.length || pathKeys.has(k), `${ctx}: user move ${n.id} ${n.san} not in any line`)
+    for (const c of n.children) covered(c, nowBlocked, k)
   }
-  for (const ch of rep.chapters) for (const r of ch.roots) covered(r, false)
+  for (const ch of rep.chapters) for (const r of ch.roots) covered(r, false, positionKey(ch.startFen))
 
   // linesByNode consistent
   let total = 0
@@ -251,6 +288,53 @@ for (const [core, extra] of [
   assert.ok(names.has('5.c4 Bg7'))
   const lon = built.get('maxPly 0')!.get('london')!
   assert.ok(lon.lines.some((l) => /^\d+\.\.\.\S+ \d+\.\S+$/.test(l.name)), 'black divergence names look like "2...e5 3.Nf3"')
+}
+
+// Study overrides (src/data/studyOverrides.ts, review: chess #1, #6, #7, #9).
+{
+  const sic = built.get('maxPly 0 + extras')!.get('sicilian')!
+  const lon = built.get('maxPly 30')!.get('london')!
+  const d4 = built.get('maxPly 30')!.get('vs-d4')!
+  const nodesAt = (rep: Repertoire, sans: string) => {
+    const c = new Chess()
+    for (const s of sans.split(' ')) c.move(s)
+    const fen = c.fen()
+    return [...rep.nodesById.values()].filter((n) => positionKey(n.fenBefore) === positionKey(fen))
+  }
+  // 7...Bxf3? (Alapin) is marked in BOTH move orders that reach the position; nothing teaches it.
+  const viaNf6 = nodesAt(sic, 'e4 c5 c3 d5 exd5 Qxd5 Nf3 Nf6 d4 Bg4 Be2 e6 c4').filter((n) => n.san === 'Bxf3')
+  assert.ok(viaNf6.length >= 1 && viaNf6.every(isDubious), '7...Bxf3 marked')
+  assert.equal(viaNf6[0].children[0].san, 'cxd5', 'the engine refutation is the first answer')
+  const viaBg4 = bookMovesAt(sic, nodesAt(sic, 'e4 c5 c3 d5 exd5 Qxd5 Nf3 Bg4 Be2 Nf6 d4 e6 c4')[0].fenBefore)
+  assert.ok(viaBg4.some((n) => n.san === 'Qd7' && !isDubious(n)))
+  assert.ok(viaBg4.filter((n) => n.san === 'Bxf3').every(isDubious), '7...Bxf3 by transposition is marked too')
+  for (const rep of [sic, lon, d4]) {
+    for (const l of rep.lines) {
+      for (const m of l.moves) if (m.color === userColorOf(rep.opening)) assert.ok(!isDubious(m), `${l.id} teaches ${m.san}`)
+    }
+  }
+  // Contrast notes are cut: no Sicilian line plays 1...d5.
+  assert.ok(!sic.lines.some((l) => l.moves[1]?.san === 'd5' && l.moves[0].san === 'e4'), 'no 1.e4 d5 line')
+  // Opponent blunders the study left unmarked are flagged (Punish it!).
+  const nb3 = sic.lines.find((l) => l.moves.some((m) => m.san === 'Nb3' && m.ply === 15 && m.fenBefore.includes('1qb')))
+  assert.ok(!nb3 || nb3.hasOpponentBlunder)
+  assert.ok(sic.lines.some((l) => l.hasOpponentBlunder && l.moves.some((m) => m.san === 'Nc3' && m.ply === 25)), '13.Nc3?? line')
+  // Trap demos: the line stops before the kid's ?/?? move and shows it (with its refutation) afterwards.
+  const ne5 = lon.lines.find((l) => l.tailIsTrap && l.tail!.some((m) => m.san === 'Ne5'))
+  assert.ok(ne5, '5.Ne5?? trap demo')
+  assert.deepEqual(ne5!.tail!.map((m) => m.san), ['e6', 'Ne5', 'Bxd1'])
+  assert.ok(d4.lines.some((l) => l.tailIsTrap && l.tail!.some((m) => m.san === 'fxe5')), '9...fxe5? trap demo')
+  // "What happens next": the study's final reply after the kid's last move is kept as a tail.
+  // (QGA 2...e6 3.Nc3 dxc4 4.e4 c5 is followed in the study by 5.d5, which used to be trimmed silently.)
+  const c5 = d4.lines.filter((l) => l.moves.map((m) => m.san).join(' ') === 'd4 d5 c4 e6 Nc3 dxc4 e4 c5')
+  assert.ok(c5.length === 1 && !c5[0].tailIsTrap && c5[0].tail?.map((m) => m.san).join(' ') === 'd5', '5.d5 shown after 4...c5')
+  // Comment clean-up: a 2-letter keystroke is dropped, "Alternative" is reworded.
+  const job = built.get('maxPly 0 + extras')!.get('london')!
+  assert.ok(![...job.nodesById.values()].some((n) => n.comment === 'df'), '"df" dropped')
+  assert.ok([...job.nodesById.values()].some((n) => n.comment === 'Another good move here.'))
+  // Overrides can be switched off (and then nothing is marked).
+  const raw = buildRepertoire(OPENINGS[0], games, { maxPly: 0, enabledExtras: [], overrides: [] })
+  assert.ok(raw.lines.some((l) => l.moves.some((m) => m.san === 'Bxf3' && m.color === 'b' && m.ply === 14)))
 }
 
 // ---------------------------------------------------------------------------

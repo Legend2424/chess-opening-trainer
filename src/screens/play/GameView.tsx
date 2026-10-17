@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import ChessBoard from '../../components/ChessBoard.tsx'
 import { Button, Modal, SpeechBubble, toast } from '../../components/ui/index.ts'
 import { actions } from '../../store/appStore.ts'
+import { engineGameCoins } from '../../store/rewards.ts'
 import { celebrate } from '../../fx/celebrate.ts'
 import { sfx } from '../../fx/sound.ts'
 import type { Arrow, BoardThemeId, PieceSetId, Profile } from '../../types.ts'
@@ -281,6 +282,7 @@ export function GameView({ setup, profile, boardTheme, pieceSet, onPlayAgain, on
         userMoved={g.userMoved}
         hintsUsed={g.hintsUsed}
         undos={g.undos}
+        helpCost={end ? engineGameCoins(end.result, rating) - engineGameCoins(end.result, Math.min(rating, 400)) : 0}
         onPlayAgain={onPlayAgain}
         onChangeSettings={onSetup}
         onClose={() => setShowResult(false)}

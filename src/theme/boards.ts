@@ -16,18 +16,10 @@
 
 import type { CSSProperties } from 'react'
 import { BOARD_THEME_IDS, type BoardThemeId } from '../types.ts'
+import { assetUrl } from '../util/assetUrl.ts'
 
-/** Resolve a file in /public against Vite's base URL (works under a GitHub Pages sub-path). */
-export function assetUrl(path: string): string {
-  let base = '/'
-  try {
-    base = import.meta.env?.BASE_URL ?? '/'
-  } catch {
-    base = '/'
-  }
-  if (!base.endsWith('/')) base += '/'
-  return base + path.replace(/^\/+/, '')
-}
+// Shared helper (also used by the engine and the study loader); re-exported for existing imports.
+export { assetUrl }
 
 export interface BoardHighlightColors {
   /** Tint for the from/to squares of the last move. */

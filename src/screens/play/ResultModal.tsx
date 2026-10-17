@@ -34,12 +34,25 @@ export interface ResultModalProps {
   hintsUsed: number
   /** Undos used this game (hints or undos make it a helped game: beginner-rate coins). */
   undos?: number
+  /** Coins a win/draw WITHOUT help would have added at this robot level (0 = help cost nothing). */
+  helpCost?: number
   onPlayAgain: () => void
   onChangeSettings: () => void
   onClose: () => void
 }
 
-export function ResultModal({ open, end, outcome, userMoved, hintsUsed, undos = 0, onPlayAgain, onChangeSettings, onClose }: ResultModalProps) {
+export function ResultModal({
+  open,
+  end,
+  outcome,
+  userMoved,
+  hintsUsed,
+  undos = 0,
+  helpCost = 0,
+  onPlayAgain,
+  onChangeSettings,
+  onClose,
+}: ResultModalProps) {
   if (!end) return null
   const t = resultText(end)
   const tone = end.result === 'win' ? 'win' : end.result === 'draw' ? 'draw' : 'loss'
@@ -106,8 +119,10 @@ export function ResultModal({ open, end, outcome, userMoved, hintsUsed, undos = 
             ))}
           </div>
         )}
-        {(hintsUsed > 0 || undos > 0) && end.result !== 'loss' && (
-          <p className="play-result__small">💡 Helped game (hints or undo) — a great way to learn! Win without help to earn the full robot bonus.</p>
+        {(hintsUsed > 0 || undos > 0) && end.result !== 'loss' && helpCost > 0 && (
+          <p className="play-result__small">
+            💡 Helped game (hints or undo) — a great way to learn! Win without help for +{helpCost} more coins.
+          </p>
         )}
       </div>
     </Modal>

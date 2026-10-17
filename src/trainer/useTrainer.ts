@@ -6,8 +6,8 @@
 // MoveNode carries its subtree). It lives in React state + a ref only.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Line, Repertoire, TrainerMode } from '../types.ts'
-import { pickLine } from '../chess/scheduler.ts'
+import type { Line, LineStats, Repertoire, TrainerMode } from '../types.ts'
+import { pickLineBalanced } from '../chess/scheduler.ts'
 import { userColorOf } from '../chess/repertoire.ts'
 import {
   expectedNode,
@@ -19,7 +19,7 @@ import {
   type TrainerContext,
   type TrainerState,
 } from './trainerReducer.ts'
-import { actions, getActiveProfile, type LineReward } from '../store/appStore.ts'
+import { actions, getActiveProfile, getStoreEpoch, type LineReward } from '../store/appStore.ts'
 import type { LineResultInputX } from '../store/achievements.ts'
 import { sfx } from '../fx/sound.ts'
 import { engineStatus, judgeMistake, preloadEngine, stopEngine, type MistakeVerdict } from '../engine/engineService.ts'
@@ -91,10 +91,37 @@ export interface TrainerApi {
   sessionLines: number
   /** Increments on every wrong move (board shake). */
   shake: number
+  /**
+   * The player's line stats as they were when this run started (for the NEW /
+   * Review badges, so finishing the line doesn't flip them behind the modal).
+   */
+  runStats: Record<string, LineStats>
 }
 
 /** Session combo per player; survives leaving the trainer (but not a reload). */
 const sessionCombos = new Map<string, number>()
+
+/**
+ * The last session per player + trainer (opening/chapter + mode): coins and lines so far and the
+ * line just finished. Coming back to the trainer within SESSION_MS carries on from there (and
+ * Coach's Choice doesn't hand out the very same line again).
+ */
+const lastSession = new Map<string, { lineId: string; coins: number; lines: number; at: number }>()
+const SESSION_MS = 60 * 60 * 1000
+
+/**
+ * Session memory belongs to the data it was built on: after a backup import or a profile reset
+ * it starts clean (no combo or carried mistakes from before).
+ */
+let seenEpoch = getStoreEpoch()
+function syncEpoch(): void {
+  const e = getStoreEpoch()
+  if (e === seenEpoch) return
+  seenEpoch = e
+  sessionCombos.clear()
+  carries.clear()
+  lastSession.clear()
+}
 
 /**
  * An attempt abandoned mid-line (Restart, leaving the trainer, a new line before
@@ -118,6 +145,7 @@ const carries = new Map<string, Carry>()
 const CARRY_MS = 60 * 60 * 1000
 
 function carryKey(lineId: string): string {
+  syncEpoch()
   return `${getActiveProfile()?.id ?? ''}|${lineId}`
 }
 
@@ -134,6 +162,12 @@ function peekCarry(lineId: string, now = Date.now()): Carry | undefined {
 const FIRST_REPLY_MS = 900
 const REPLY_MS = 600
 const SHOW_COMPLETE_MS = 650
+/** After the line: the study's next move(s) / trap demo, then time to read Hoot's note. */
+const TAIL_FIRST_MS = 800
+const TAIL_MS = 950
+const TAIL_READ_MS = 2200
+/** "Show me the moves" on for less than this before switching it off again = a mis-tap. */
+const LEARN_SEEN_MS = 700
 
 function isCapture(m: PlayedMove | undefined): boolean {
   return !!m && m.san.includes('x')
@@ -153,6 +187,7 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
   const openingId = rep?.opening.id ?? ''
   const userColor: 'w' | 'b' = rep ? userColorOf(rep.opening) : 'w'
   const orderKey = inOrderKey(openingId, mode, chapterId)
+  const sessionKey = `${getActiveProfile()?.id ?? ''}|${orderKey}|${mode}`
 
   const pool = useMemo<Line[]>(() => {
     if (!rep) return []
@@ -175,7 +210,8 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
           const keep = lines.find((l) => l.id === pinned)
           if (keep) return keep
         }
-        return pickLine(lines, getActiveProfile()?.lineStats ?? {}, Date.now(), { avoidLineId: avoidLineRef.current })
+        // Chapter first, then a line: a chapter with many lines doesn't crowd out the others.
+        return pickLineBalanced(lines, getActiveProfile()?.lineStats ?? {}, Date.now(), { avoidLineId: avoidLineRef.current })
       },
     }
   }, [rep])
@@ -188,10 +224,21 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
   const [insight, setInsight] = useState<MistakeInsight | null>(null)
   const [outcome, setOutcome] = useState<LineOutcome | null>(null)
   const [showComplete, setShowComplete] = useState(false)
-  const [combo, setCombo] = useState(() => sessionCombos.get(getActiveProfile()?.id ?? '') ?? 0)
-  const [sessionCoins, setSessionCoins] = useState(0)
-  const [sessionLines, setSessionLines] = useState(0)
+  const [combo, setCombo] = useState(() => {
+    syncEpoch()
+    return sessionCombos.get(getActiveProfile()?.id ?? '') ?? 0
+  })
+  // Back in the same trainer soon after (e.g. Home and back): the session carries on.
+  const [resumed] = useState(() => {
+    syncEpoch()
+    const s = lastSession.get(sessionKey)
+    return s && Date.now() - s.at < SESSION_MS ? s : undefined
+  })
+  const [sessionCoins, setSessionCoins] = useState(() => resumed?.coins ?? 0)
+  const [sessionLines, setSessionLines] = useState(() => resumed?.lines ?? 0)
   const [shake, setShake] = useState(0)
+  const [runStats, setRunStats] = useState<Record<string, LineStats>>(() => getActiveProfile()?.lineStats ?? {})
+  const sessionRef = useRef({ coins: resumed?.coins ?? 0, lines: resumed?.lines ?? 0 })
 
   // Refs: the reducer runs synchronously in event handlers, so the board's
   // onMove can tell right away whether the move is shown.
@@ -242,10 +289,20 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
     })
   }, [])
 
+  /** The engine's check of an earlier wrong move is no longer wanted: cancel it (it can be slow on an iPad). */
+  const cancelJudges = () => {
+    if (pendingJudges.current > 0) {
+      pendingJudges.current = 0
+      stopEngine()
+    }
+  }
+
   /** Reset per-line bookkeeping (new line or restart) for a run on `lineId`. */
   const resetRun = useCallback((lineId: string) => {
     clearCompleteTimer()
+    cancelJudges()
     runRef.current++
+    setRunStats(getActiveProfile()?.lineStats ?? {})
     maxMistakesRef.current = 0
     // Arrows already seen in an abandoned attempt of this line keep it a learn-mode line.
     const carriedLearn = !!peekCarry(lineId)?.learn
@@ -284,7 +341,7 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
       if (p.length === 0) return null
       const profile = getActiveProfile()
       if (mode === 'random') {
-        const line = pickLine(p, profile?.lineStats ?? {}, Date.now(), { avoidLineId })
+        const line = pickLineBalanced(p, profile?.lineStats ?? {}, Date.now(), { avoidLineId })
         return { line, index: -1 }
       }
       const stored = profile?.inOrderIndex[orderKey] ?? 0
@@ -327,12 +384,15 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
         maxMistakesOnOneMove: Math.max(maxMistakesRef.current, carry?.maxHere ?? 0),
       }
       const reward = actions.applyLineResult(input, r)
+      syncEpoch()
       // A quick repeat ("farmed") neither grows nor breaks the combo; a non-perfect line breaks it.
       const nextCombo = perfect ? (reward.farmed ? comboBefore : comboBefore + 1) : 0
       sessionCombos.set(profileId, nextCombo)
       setCombo(nextCombo)
-      setSessionCoins((c) => c + reward.coins)
-      setSessionLines((n) => n + 1)
+      sessionRef.current = { coins: sessionRef.current.coins + reward.coins, lines: sessionRef.current.lines + 1 }
+      setSessionCoins(sessionRef.current.coins)
+      setSessionLines(sessionRef.current.lines)
+      lastSession.set(sessionKey, { lineId: s.line.id, ...sessionRef.current, at: now })
 
       let wrapped = false
       const p = poolRef.current
@@ -357,12 +417,14 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
         fen: s.fen,
       })
       clearCompleteTimer()
+      // A line with a tail first plays it on the board (see the tail effect below).
+      if (s.line.tail && s.line.tail.length > 0) return
       completeTimer.current = window.setTimeout(() => {
         completeTimer.current = undefined
         if (aliveRef.current && runRef.current === run) setShowComplete(true)
       }, SHOW_COMPLETE_MS)
     },
-    [mode, orderKey],
+    [mode, orderKey, sessionKey],
   )
 
   // ---- engine insight -----------------------------------------------------------
@@ -372,6 +434,8 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
     const wrong = next.wrong
     if (!fb || !exp || !wrong) return
     if (engineStatus() === 'error') return
+    // Only the newest wrong move matters: drop an older check still queued or running.
+    cancelJudges()
     const run = runRef.current
     const fid = fb.id
     setInsight({ feedbackId: fid, status: 'pending', verdict: null })
@@ -420,7 +484,11 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
         }
         case 'takeBack':
           setSticky(null)
+          cancelJudges()
           if (next.hintLevel > prev.hintLevel) sfx.hint()
+          break
+        case 'tailMove':
+          moveSound(next.history[next.history.length - 1])
           break
         case 'hint':
           setSticky(null)
@@ -440,14 +508,15 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
     const done = initedFor.current
     if (done && done.rep === rep && done.pool === pool) return
     initedFor.current = { rep, pool }
-    const prevId = stateRef.current?.line.id
+    // Avoid the line just played, also when coming back to the trainer.
+    const prevId = stateRef.current?.line.id ?? resumed?.lineId
     const c = chooseLine(prevId)
     if (c) startLine(c.line, c.index, prevId)
     else {
       stateRef.current = null
       setState(null)
     }
-  }, [rep, ctx, pool, chooseLine, startLine])
+  }, [rep, ctx, pool, chooseLine, startLine, resumed])
 
   // ---- opponent auto-replies -------------------------------------------------------
   useEffect(() => {
@@ -456,9 +525,31 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
     return () => window.clearTimeout(t)
   }, [state, ctx, dispatch])
 
-  // ---- "Show me the moves" arrow on screen (the board reveals it on the user's turn) ----
+  // ---- after the line: "what happens next" / trap demo, then the completion modal ----
   useEffect(() => {
-    if (learnMode && state?.phase === 'userToMove') arrowSeenRef.current = true
+    if (!state || state.phase !== 'complete') return
+    const tail = state.line.tail
+    if (!tail || tail.length === 0) return
+    const run = runRef.current
+    if (state.tailPly < tail.length) {
+      const t = window.setTimeout(() => dispatch({ type: 'tailMove' }), state.tailPly === 0 ? TAIL_FIRST_MS : TAIL_MS)
+      return () => window.clearTimeout(t)
+    }
+    const t = window.setTimeout(() => {
+      if (aliveRef.current && runRef.current === run && completedRunRef.current === run) setShowComplete(true)
+    }, TAIL_READ_MS)
+    return () => window.clearTimeout(t)
+  }, [state, dispatch])
+
+  // ---- "Show me the moves" arrow on screen (the board reveals it on the user's turn) ----
+  // It counts as seen only after LEARN_SEEN_MS, so an accidental ON then OFF tap doesn't
+  // turn the line into a learn-mode line.
+  useEffect(() => {
+    if (!learnMode || state?.phase !== 'userToMove') return
+    const t = window.setTimeout(() => {
+      if (learnRef.current) arrowSeenRef.current = true
+    }, LEARN_SEEN_MS)
+    return () => window.clearTimeout(t)
   }, [learnMode, state])
 
   // ---- engine warm-up + cleanup ---------------------------------------------------
@@ -520,10 +611,9 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
     // off before any arrow was on screen makes it a normal line again. (After
     // the line is complete the switch only affects the next line.)
     if (!s || s.phase !== 'complete') {
-      if (on) {
-        lineLearnRef.current = true
-        if (s && s.phase === 'userToMove') arrowSeenRef.current = true // the arrow shows right away
-      } else if (!arrowSeenRef.current) lineLearnRef.current = false
+      // The arrow counts as seen once it has been on screen a moment (effect above).
+      if (on) lineLearnRef.current = true
+      else if (!arrowSeenRef.current) lineLearnRef.current = false
       setLineIsLearn(lineLearnRef.current)
     }
     actions.setSetting('learnMode', on)
@@ -557,5 +647,6 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
     sessionCoins,
     sessionLines,
     shake,
+    runStats,
   }
 }

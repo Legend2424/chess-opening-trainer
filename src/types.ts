@@ -82,6 +82,15 @@ export interface Line {
   userMoveCount: number
   /** true if any opponent move in the line carries ? or ?? (a trap to punish). */
   hasOpponentBlunder: boolean
+  /**
+   * "This is why!": study moves right after the kid's last move that are shown
+   * (auto-played) once the line is complete — the opponent's reply/punishment
+   * the study ends with, or a trap demonstration (a ?/?? move by the kid's side
+   * and its refutation). Not part of the line's id, never counted as user moves.
+   */
+  tail?: MoveNode[]
+  /** The tail demonstrates a mistake by the kid's side (a trap), not just the opponent's reply. */
+  tailIsTrap?: boolean
 }
 
 export interface ChapterRef {
@@ -123,6 +132,16 @@ export interface LineStats {
   lastPracticed: number // epoch ms
   dueAt: number // epoch ms
   lastMistakes: number
+  /**
+   * Completions that were learn-mode runs ("Show me the moves", or arrows on
+   * about half the moves). The "New line" bonus waits for the first completion
+   * that is NOT one of these. Absent = 0.
+   */
+  learnCompletions?: number
+  /** The last completion was a paid learn-mode run: the next normal run is never "farmed". */
+  learnPending?: boolean
+  /** The one full-pay quick retry after a failed run was used (further quick repeats are "farmed"). */
+  quickRetryUsed?: boolean
 }
 
 export type ItemKind = 'board' | 'pieces' | 'avatar' | 'trophy' | 'effect' | 'title'
@@ -206,8 +225,25 @@ export interface Profile {
 
 export interface ParentSettings {
   pin: string | null // null until set on first visit
-  /** When the PIN was last replaced through "Forgot the PIN?" (shown in the parent zone). */
+  /** When the PIN was last replaced through "Forgot the PIN?" (legacy single value; see pinResets). */
   pinResetAt?: number
+  /**
+   * Every "Forgot the PIN?" reset (epoch ms, oldest first, capped at 10). Add-only:
+   * a backup import merges these instead of replacing them, so a reset can't be hidden.
+   */
+  pinResets?: number[]
+  /** A reset done with the grown-up question only (no recovery code): approvals and gifts pause for a day after it. */
+  pinFallbackResetAt?: number
+  /** The parent tapped "That was me" on the PIN-reset notice (hides notices up to this time). */
+  pinResetAckAt?: number
+  /** SHA-256 (hex) of the parent's recovery code. Never exported in backups. */
+  recoveryHash?: string
+  /** "Forgot the PIN?" without the recovery code: the reset unlocks 24 h after this request. */
+  pinResetRequestedAt?: number
+  /** Latest device time seen by the app (to spot the clock being moved). */
+  lastSeenAt?: number
+  /** Recent big jumps of the device clock (newest last, capped). */
+  clockJumps?: Array<{ from: number; to: number }>
   rewards: RewardDef[] // includes the Pokémon pack
   maxPly: Record<string, number> // per opening id; 0 = no limit
   enabledExtras: string[] // extra chapter ids switched on

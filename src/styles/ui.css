@@ -1086,6 +1086,22 @@ button.topbar__who {
   font-weight: 700;
   color: var(--c-ink-2);
 }
+.toast__action {
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 6px 14px;
+  border: 2px solid var(--c-primary, #5b3df0);
+  border-radius: var(--radius-pill, 999px);
+  background: #fff;
+  color: var(--c-primary, #5b3df0);
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.toast__action:active {
+  transform: translateY(1px);
+}
 .toast--success {
   --toast-accent: #86efac;
 }
@@ -1118,6 +1134,13 @@ button.topbar__who {
 }
 .bubble__speaker.is-bobbing {
   animation: oq-float 3.2s ease-in-out infinite;
+}
+/* Stable live region around the (re-keyed) bubble; takes the bubble's place in the row. */
+.bubble-live {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 .bubble {
   position: relative;

@@ -340,7 +340,9 @@ export function combineComments(raws: string[]): { text: string; arrows: Arrow[]
   const highlights: Highlight[] = []
   for (const r of raws) {
     const p = parseCommentCommands(r)
-    if (p.text) texts.push(p.text)
+    // A stray keystroke left in the study ("df") is not a comment: keep only
+    // texts with at least 3 letters.
+    if (p.text && (p.text.match(/\p{L}/gu)?.length ?? 0) >= 3) texts.push(p.text)
     arrows.push(...p.arrows)
     highlights.push(...p.highlights)
   }

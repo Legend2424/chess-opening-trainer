@@ -6,5 +6,6 @@ dist-ssr
 _*.txt
 *.tsbuildinfo
 
-# raw Lichess exports (private study) — only the extracted file in public/ is shipped
-data/
+# raw Lichess exports (private study) — only the extracted file in public/ is shipped.
+# Anchored to the repo root: src/data/ (openings.ts, studyOverrides.ts) MUST be committed.
+/data/

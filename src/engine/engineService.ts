@@ -1,12 +1,19 @@
-// One lazily-loaded Stockfish instance shared by the whole app (the NNUE net is
-// ~40 MB, so we never want two on an iPad). The trainer uses it to judge how
-// bad a wrong move was; the Play screen uses it as the opponent.
+// One lazily-loaded Stockfish instance shared by the whole app (a worker plus
+// a ~0.6 MB wasm, classical evaluation — the NNUE net is not shipped, see
+// public/engine/README.md — so we never want two on an iPad). The trainer uses
+// it to judge how bad a wrong move was; the Play screen uses it as the opponent.
+//
+// Searches run one at a time in the Engine's queue, each with its own Skill
+// Level (analysis at full strength, the robot at its playing strength), so the
+// two callers never steal each other's answers. stopEngine() cancels the
+// running search AND everything queued, also while the engine is still loading.
 import { Chess } from 'chess.js'
 import { Engine, type Score, type StrengthSettings } from './stockfish.ts'
 
 let engine: Engine | null = null
 let loading: Promise<Engine> | null = null
-let mode: 'analysis' | 'play' = 'analysis'
+/** Bumped by stopEngine(): work started before it gives up at its next step. */
+let cancelEpoch = 0
 
 export type EngineStatus = 'idle' | 'loading' | 'ready' | 'error'
 let status: EngineStatus = 'idle'
@@ -31,19 +38,31 @@ export function getEngine(): Promise<Engine> {
   if (!loading) {
     setStatus('loading')
     const e = new Engine()
-    loading = e
+    // A search that never answers: throw THIS engine away (never a newer one).
+    e.onHang = () => {
+      if (engine === e) resetEngine()
+    }
+    const p = e
       .init()
       .then(() => {
+        if (loading !== p) {
+          // resetEngine() ran while this one was loading: it is not ours any more.
+          e.dispose()
+          throw new Error('Stockfish was restarted')
+        }
         engine = e
         setStatus('ready')
         return e
       })
       .catch((err: unknown) => {
-        loading = null
+        if (loading === p) {
+          loading = null
+          setStatus('error')
+        }
         e.dispose()
-        setStatus('error')
         throw err
       })
+    loading = p
   }
   return loading
 }
@@ -55,8 +74,13 @@ export function preloadEngine(): void {
   })
 }
 
-/** Stop whatever the engine is doing (pending queries resolve with null). */
+/**
+ * Stop whatever the engine is doing: the running search and every queued one
+ * (pending queries resolve with null). Also cancels work still waiting for the
+ * engine to load (e.g. the trainer's mistake check when the trainer closes).
+ */
 export function stopEngine(): void {
+  cancelEpoch++
   engine?.stop()
 }
 
@@ -68,32 +92,13 @@ export function resetEngine(): void {
   const old = engine
   engine = null
   loading = null
-  mode = 'analysis'
+  cancelEpoch++
   old?.dispose()
   setStatus('idle')
 }
 
+/** An analysis search that hasn't answered this long after it STARTED is given up (and the engine reset). */
 const ANALYSIS_TIMEOUT_MS = 20_000
-
-/** Resolve with null (and reset the engine) if an analysis query hangs. */
-function withTimeout<T>(p: Promise<T | null>, ms = ANALYSIS_TIMEOUT_MS): Promise<T | null> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      resetEngine()
-      resolve(null)
-    }, ms)
-    p.then(
-      (v) => {
-        clearTimeout(timer)
-        resolve(v)
-      },
-      () => {
-        clearTimeout(timer)
-        resolve(null)
-      },
-    )
-  })
-}
 
 function toCp(s: Score | null): number | null {
   if (!s) return null
@@ -101,27 +106,21 @@ function toCp(s: Score | null): number | null {
   return s.cp ?? null
 }
 
-async function analysisEngine(): Promise<Engine> {
+/** Score (centipawns, from White's point of view) of a position, or null. Null too if stopEngine() ran since `epoch`. */
+export async function evaluateWhite(fen: string, depth = 12, epoch: number = cancelEpoch): Promise<number | null> {
   const e = await getEngine()
-  if (mode !== 'analysis') {
-    e.setFullStrength()
-    mode = 'analysis'
-  }
-  return e
-}
-
-/** Score (centipawns, from White's point of view) of a position, or null. */
-export async function evaluateWhite(fen: string, depth = 12): Promise<number | null> {
-  const e = await analysisEngine()
-  const cp = toCp(await withTimeout(e.evaluate(fen, depth)))
-  if (cp === null) return null
+  if (epoch !== cancelEpoch) return null
+  const cp = toCp(await e.evaluate(fen, depth, ANALYSIS_TIMEOUT_MS))
+  if (cp === null || epoch !== cancelEpoch) return null
   return fen.split(' ')[1] === 'w' ? cp : -cp
 }
 
 /** Best move (uci) at full strength, or null. */
 export async function bestMove(fen: string, depth = 14): Promise<string | null> {
-  const e = await analysisEngine()
-  return withTimeout(e.bestMoveAtDepth(fen, depth))
+  const epoch = cancelEpoch
+  const e = await getEngine()
+  if (epoch !== cancelEpoch) return null
+  return e.bestMoveAtDepth(fen, depth, ANALYSIS_TIMEOUT_MS)
 }
 
 export type MistakeVerdict = {
@@ -143,7 +142,8 @@ function fenAfter(fenBefore: string, uci: string): string | null {
 
 /**
  * Compare a wrong move with the study move from the same position.
- * Returns null if the engine can't load or the moves are invalid.
+ * Returns null if the engine can't load, the moves are invalid, or
+ * stopEngine() was called meanwhile (then no further search is started).
  */
 export async function judgeMistake(
   fenBefore: string,
@@ -151,15 +151,16 @@ export async function judgeMistake(
   bookUci: string,
   depth = 11,
 ): Promise<MistakeVerdict | null> {
+  const epoch = cancelEpoch
   const afterWrong = fenAfter(fenBefore, wrongUci)
   const afterBook = fenAfter(fenBefore, bookUci)
   if (!afterWrong || !afterBook) return null
   try {
-    const wrong = await evaluateWhite(afterWrong, depth)
+    const wrong = await evaluateWhite(afterWrong, depth, epoch)
     // Cancelled (stopEngine) or failed: don't start a second search.
-    if (wrong === null) return null
-    const book = await evaluateWhite(afterBook, depth)
-    if (book === null) return null
+    if (wrong === null || epoch !== cancelEpoch) return null
+    const book = await evaluateWhite(afterBook, depth, epoch)
+    if (book === null || epoch !== cancelEpoch) return null
     const mover = fenBefore.split(' ')[1] === 'w' ? 1 : -1
     const lossCp = Math.max(0, (book - wrong) * mover)
     const kind = lossCp >= 200 ? 'blunder' : lossCp >= 70 ? 'worse' : 'fine'
@@ -169,10 +170,9 @@ export async function judgeMistake(
   }
 }
 
-/** Configure the engine as a playing opponent of the given strength. */
+/** Configure the engine as a playing opponent of the given strength (used by its next go()). */
 export async function playEngine(strength: StrengthSettings): Promise<Engine> {
   const e = await getEngine()
   e.setStrength(strength)
-  mode = 'play'
   return e
 }

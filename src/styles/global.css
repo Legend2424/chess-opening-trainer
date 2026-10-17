@@ -1,14 +1,17 @@
 /* Opening Quest - global styles: fonts, design tokens, base, layout helpers,
    animations, board overlay styles. Component styles live in ui.css. */
 
-@import '@fontsource/fredoka/400.css';
-@import '@fontsource/fredoka/500.css';
-@import '@fontsource/fredoka/600.css';
-@import '@fontsource/fredoka/700.css';
-@import '@fontsource/nunito/400.css';
-@import '@fontsource/nunito/600.css';
-@import '@fontsource/nunito/700.css';
-@import '@fontsource/nunito/800.css';
+/* Latin subset only: the app's text (and the kids' names so far) never needs the
+   cyrillic / greek / vietnamese / latin-ext files, which only made the CSS and the
+   deploy bigger (browsers fall back to the system font for anything else). */
+@import '@fontsource/fredoka/latin-400.css';
+@import '@fontsource/fredoka/latin-500.css';
+@import '@fontsource/fredoka/latin-600.css';
+@import '@fontsource/fredoka/latin-700.css';
+@import '@fontsource/nunito/latin-400.css';
+@import '@fontsource/nunito/latin-600.css';
+@import '@fontsource/nunito/latin-700.css';
+@import '@fontsource/nunito/latin-800.css';
 @import './ui.css';
 
 /* ------------------------------------------------------------------ tokens */
@@ -367,6 +370,8 @@ img,
   .layout-train__panel {
     max-height: var(--train-avail-h);
     overflow-y: auto;
+    /* A bubble's pop-in (scale 1.06) must not flash a horizontal scrollbar. */
+    overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
   }
@@ -385,6 +390,7 @@ img,
   }
   .layout-train__panel {
     overflow-y: auto;
+    overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
   }
@@ -782,4 +788,60 @@ img,
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ------------------------------------------------------ lazy screens / crash */
+.screen-loading {
+  min-height: var(--app-h, 100vh);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.3rem;
+  color: #fff;
+}
+.app-crash {
+  min-height: var(--app-h, 100vh);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+.app-crash__card {
+  width: min(420px, 100%);
+  padding: 24px 20px;
+  border-radius: 28px;
+  background: #fff;
+  box-shadow: var(--shadow-soft);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.app-crash__emoji {
+  font-size: 3.2rem;
+  line-height: 1;
+}
+.app-crash__title {
+  margin: 0;
+  font-family: var(--font-head);
+  font-size: 1.5rem;
+  color: var(--c-ink);
+}
+.app-crash__text {
+  margin: 0;
+  font-weight: 700;
+  color: var(--c-ink-2);
+}
+.app-crash__btn {
+  min-height: 56px;
+  padding: 0 28px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--c-primary);
+  color: #fff;
+  font-family: var(--font-head);
+  font-size: 1.2rem;
+  font-weight: 700;
+  cursor: pointer;
 }

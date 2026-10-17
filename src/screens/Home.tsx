@@ -202,6 +202,8 @@ function greeting(name: string, hour: number): string {
 
 function nudge(goal: { done: number; goal: number; met: boolean }, due: number): string {
   if (goal.met) return "You reached today's goal — amazing! Extra practice makes you even stronger. 💪"
+  // The goal was lowered after these lines: the next NEW line claims it.
+  if (goal.done >= goal.goal) return "Play 1 new line to claim today's goal bonus! 🎯"
   if (due > 0) return `${plural(due, 'line')} would love a quick review. Ready to practise?`
   if (goal.done > 0) return `Just ${plural(goal.goal - goal.done, 'more line')} to reach today's goal. You can do it!`
   return 'Ready to practise? Pick an opening below!'
@@ -228,9 +230,11 @@ function GoalCard({ done, goal, met, streak }: { done: number; goal: number; met
       </ProgressRing>
       <div className="home-goal__text">
         <span className="home-goal__label">Today's goal</span>
-        <span className="home-goal__sub">{met ? 'Done! 🎉' : `${done} of ${plural(goal, 'line')}`}</span>
+        <span className="home-goal__sub">
+          {met ? 'Done! 🎉' : done >= goal ? 'Play 1 new line to claim it!' : `${done} of ${plural(goal, 'line')}`}
+        </span>
         <span className={streak > 0 ? 'home-goal__streak' : 'home-goal__streak is-off'}>
-          🔥 {streak > 0 ? `${plural(streak, 'day')} streak` : 'Start a streak!'}
+          🔥 {streak > 0 ? `${streak}-day streak` : 'Start a streak!'}
         </span>
       </div>
     </Card>

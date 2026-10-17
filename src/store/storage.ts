@@ -24,6 +24,7 @@ import {
   localDateKey,
 } from './defaults.ts'
 import type { DailyStateX } from './defaults.ts'
+import { mergeParentOnImport } from './profileOps.ts'
 
 export const STORAGE_KEY = 'opening-quest.v1'
 /** The (large) imported study PGN is stored separately so a quota problem there never blocks progress saves. */
@@ -34,6 +35,8 @@ export const STUDY_KEY = 'opening-quest.v1.study'
  */
 export const CORRUPT_KEY = 'opening-quest.v1.corrupt'
 export const CORRUPT_LATEST_KEY = 'opening-quest.v1.corrupt.latest'
+/** The data as it was just before the last backup restore (for "Undo restore"). */
+export const BEFORE_RESTORE_KEY = 'opening-quest.v1.before-restore'
 export const CURRENT_VERSION = 1
 export const SAVE_DEBOUNCE_MS = 300
 export const BACKUP_APP_ID = 'opening-quest'
@@ -67,6 +70,33 @@ function backend(): KeyValueStorage | null {
     return localStorage
   } catch {
     return null // e.g. SecurityError when storage is blocked
+  }
+}
+
+// Small side keys (PIN lockout, grown-up check back-off, restore rescue copy):
+// never part of AppData, backups or the cross-tab 'storage' adoption. Never throw.
+export function auxGet(key: string): string | null {
+  try {
+    return backend()?.getItem(key) ?? null
+  } catch {
+    return null
+  }
+}
+export function auxSet(key: string, value: string): boolean {
+  try {
+    const ls = backend()
+    if (!ls) return false
+    ls.setItem(key, value)
+    return true
+  } catch {
+    return false
+  }
+}
+export function auxRemove(key: string): void {
+  try {
+    backend()?.removeItem(key)
+  } catch {
+    // best effort
   }
 }
 
@@ -169,7 +199,7 @@ const MIGRATIONS: Record<number, (raw: Obj) => Obj> = {}
 function normLineStats(x: unknown): LineStats | null {
   if (!isObj(x)) return null
   if (!isNum(x.box) || !isNum(x.lastPracticed) || !isNum(x.dueAt)) return null
-  return {
+  const s: LineStats = {
     attempts: int0(x.attempts),
     completions: int0(x.completions),
     perfects: int0(x.perfects),
@@ -178,6 +208,12 @@ function normLineStats(x: unknown): LineStats | null {
     dueAt: x.dueAt,
     lastMistakes: int0(x.lastMistakes),
   }
+  // Optional economy markers (see LineStats): kept only when meaningful.
+  const lc = int0(x.learnCompletions)
+  if (lc > 0) s.learnCompletions = Math.min(lc, s.completions)
+  if (x.learnPending === true) s.learnPending = true
+  if (x.quickRetryUsed === true) s.quickRetryUsed = true
+  return s
 }
 
 function normDaily(x: unknown, now: number): DailyStateX {
@@ -344,6 +380,22 @@ function normParent(x: unknown): ParentSettings | string {
     dailyGoalLines: goal,
   }
   if (isNum(x.pinResetAt) && x.pinResetAt > 0) out.pinResetAt = x.pinResetAt
+  if (Array.isArray(x.pinResets)) {
+    const resets = Array.from(new Set(x.pinResets.filter((t): t is number => isNum(t) && t > 0))).sort((a, b) => a - b).slice(-10)
+    if (resets.length) out.pinResets = resets
+  }
+  for (const k of ['pinFallbackResetAt', 'pinResetAckAt', 'pinResetRequestedAt', 'lastSeenAt'] as const) {
+    const v = x[k]
+    if (isNum(v) && v > 0) out[k] = v
+  }
+  if (typeof x.recoveryHash === 'string' && /^[0-9a-z]{8,64}$/.test(x.recoveryHash)) out.recoveryHash = x.recoveryHash
+  if (Array.isArray(x.clockJumps)) {
+    const jumps = x.clockJumps
+      .filter((j): j is { from: number; to: number } => isObj(j) && isNum(j.from) && isNum(j.to))
+      .map((j) => ({ from: j.from, to: j.to }))
+      .slice(-10)
+    if (jumps.length) out.clockJumps = jumps
+  }
   return out
 }
 
@@ -631,7 +683,7 @@ export interface BackupFile {
 /** The app store registers itself so exportBackup()/importBackup() act on live state. */
 export interface LiveStore {
   get(): AppData
-  /** Swap in imported data. Must keep the current parent PIN when `data.parent.pin` is null. */
+  /** Swap in imported data. Must keep this device's PIN / recovery code and merge the PIN-reset records (mergeParentOnImport). */
   replace(data: AppData): void
 }
 let live: LiveStore | null = null
@@ -641,12 +693,14 @@ export function registerLiveStore(store: LiveStore | null): void {
 
 /**
  * Backup JSON of `data` (default: the live store's state, else what is saved).
- * The parent PIN is NEVER written to the file (`parent.pin` is null), so a kid
- * who opens the backup can't read it. Importing keeps the device's current PIN.
+ * The parent PIN and the recovery-code hash are NEVER written to the file
+ * (`parent.pin` is null), so a kid who opens the backup can't read them.
+ * Importing keeps the device's current PIN.
  */
 export function exportBackup(data?: AppData, now: number = Date.now()): string {
   const d = data ?? live?.get() ?? loadAppData(now)
   const safe: AppData = { ...d, parent: { ...d.parent, pin: null } }
+  delete safe.parent.recoveryHash
   const file: BackupFile = { app: BACKUP_APP_ID, kind: 'backup', version: CURRENT_VERSION, exportedAt: now, data: safe }
   return JSON.stringify(file, null, 1)
 }
@@ -671,15 +725,15 @@ export function parseBackup(json: string, now: number = Date.now()): ValidateRes
   return validateAppData(raw, now)
 }
 
-/** The PIN in what is currently saved (null if none / unreadable). */
-function savedPin(ls: KeyValueStorage): string | null {
+/** The parent settings in what is currently saved (null if none / unreadable). */
+function savedParent(ls: KeyValueStorage): ParentSettings | null {
   try {
     const text = ls.getItem(STORAGE_KEY)
     if (!text) return null
     const raw: unknown = JSON.parse(text)
-    if (!isObj(raw) || !isObj(raw.parent)) return null
-    const pin = raw.parent.pin
-    return typeof pin === 'string' && /^\d{4}$/.test(pin) ? pin : null
+    if (!isObj(raw)) return null
+    const p = normParent(raw.parent)
+    return typeof p === 'string' ? null : p
   } catch {
     return null
   }
@@ -702,10 +756,8 @@ export function importBackup(json: string): { ok: boolean; error?: string } {
   const ls = backend()
   if (!ls) return { ok: false, error: STORAGE_UNAVAILABLE_ERROR }
   let data = r.data
-  if (data.parent.pin === null) {
-    const pin = savedPin(ls)
-    if (pin !== null) data = { ...data, parent: { ...data.parent, pin } }
-  }
+  const cur = savedParent(ls)
+  if (cur) data = { ...data, parent: mergeParentOnImport(cur, data.parent) }
   // Keep the unreadable original before overwriting it.
   if (loadIssue) {
     try {

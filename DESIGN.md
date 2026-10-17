@@ -8,7 +8,8 @@ redeem them for real **Pokémon packs** (parent-approved).
 
 Stack (reused from `C:\Claude\chess-endgame-trainer`): React 18 + Vite 5 + TS 5.9,
 `react-chessboard` 4.7 (auto TouchBackend on iPad), `chess.js` 1.4, Stockfish 16
-NNUE WASM in `public/engine/` (lazy-loaded, only for "Play vs computer" and smart
+WASM in `public/engine/` (classical evaluation — the NNUE net is not shipped; GPLv3, see
+`public/engine/README.md`; lazy-loaded, only for "Play vs computer" and smart
 mistake feedback), `canvas-confetti`, `@fontsource/fredoka` (headings) +
 `@fontsource/nunito` (body). Static site → GitHub Pages. All state in
 `localStorage` (+ backup export/import). No backend.
@@ -59,13 +60,20 @@ export function parseCommentCommands(raw: string): { text: string; arrows: Arrow
 ```ts
 export function positionKey(fen: string): string            // first 4 FEN fields
 export function chapterIdOf(game: PgnGame): string | null    // from ChapterURL
-export interface BuildOptions { maxPly: number /*0 = no cap*/; enabledExtras: string[] }
+export interface BuildOptions { maxPly: number /*0 = no cap*/; enabledExtras: string[]; overrides?: StudyOverride[] }
 export function buildRepertoire(def: OpeningDef, games: PgnGame[], opts: BuildOptions): Repertoire
 export function bookMovesAt(rep: Repertoire, fen: string): MoveNode[]   // = rep.movesByPosition.get(positionKey(fen)) ?? []
 export function isDubious(node: MoveNode): boolean           // nags include 2 (?), 4 (??) or 6 (?!)
 export function isBlunder(node: MoveNode): boolean           // nags include 2 or 4
 export function userColorOf(def: OpeningDef): 'w' | 'b'
 ```
+**Study overrides** (`src/data/studyOverrides.ts`, applied first): the coach often shows "what
+goes wrong" as an unmarked side-line, so engine-checked corrections add ?/??/?! marks (copied to
+EVERY node with the same position + move, all chapters — a transposition can't sneak a marked
+move back in), make the engine's refutation the first answer (`reply`), cut contrast notes
+(e.g. a Scandinavian 1...d5 inside the Alapin chapter) and reword junk comments. Comments with
+fewer than 3 letters ("df") are dropped by `pgn.ts`.
+
 Line extraction rules (in this order):
 1. Walk every root→leaf path of every included chapter (core chapters in `OpeningDef.chapters`
    order, then enabled extras). Children order = main line first.
@@ -73,8 +81,18 @@ Line extraction rules (in this order):
    `isDubious`. (Opponent dubious moves stay — they are traps to punish.)
 3. Truncate to `maxPly` plies (if > 0).
 4. Trim trailing opponent moves so every line ends with a **user** move. Drop lines with 0 user moves.
+   What was trimmed is kept as the line's **tail** (`Line.tail`, not part of its id, never counted
+   as user moves): the study's reply after the kid's last move — or, when the path stopped before
+   a ?/?? move by the kid's side, a **trap demo** (that move and its refutation, `tailIsTrap`).
+   No tail when the cap cut kid moves off. The trainer auto-plays the tail after the line is
+   complete ("Here is how your coach goes on" / "Watch out for this trap"), then the modal.
 5. Dedupe identical paths (same uci sequence + chapter), and drop any line whose move list
-   is a strict prefix of another line in the same chapter.
+   is a strict prefix of another line in the same chapter. Then the same **across chapters**
+   (same start position + moves): a line repeating an earlier chapter's line, or a strict prefix
+   of another chapter's line, is dropped — except that a core line is never dropped because of an
+   extra chapter (switching extras never changes the core lines).
+   `hasOpponentBlunder` (and the trainer's "Your opponent blundered!") count an opponent move
+   marked ?/?? in ANY chapter at the same position.
 6. `name`: "Main line" if the path is the chapter's main line; otherwise the move where it first
    leaves the chapter main line plus the next move, in SAN with move numbers, e.g. `4.c4 Qd6`
    or `2...e5 3.Nf3`.
@@ -87,19 +105,24 @@ uci, keeping the main-line node first) and `linesByNode`.
 ```ts
 export const BOX_INTERVAL_DAYS = [0, 1, 2, 4, 8, 16]
 export function isMastered(s?: LineStats): boolean                 // box >= 3
-export function isDue(s: LineStats | undefined, now: number): boolean   // unseen counts as due
+export function isDue(s: LineStats | undefined, now: number): boolean   // due TODAY (local day); unseen counts as due
 export function updateLineStats(prev: LineStats | undefined,
   r: { mistakes: number; hintsUsed: number; usedArrowHint: boolean; learnMode: boolean }, now: number): LineStats
 export function lineWeight(s: LineStats | undefined, now: number): number
 export function pickLine(lines: Line[], stats: Record<string, LineStats>, now: number,
   opts?: { avoidLineId?: string; rng?: () => number }): Line
+export function pickLineBalanced(...same...): Line   // chapter first (weight = its most urgent line), then a line
 export function openingProgress(lines: Line[], stats: Record<string, LineStats>, now: number):
   { total: number; seen: number; mastered: number; due: number; percentMastered: number }
 ```
 Update rule: learn mode → box unchanged (min 0), dueAt = now + 1 day if box 0. Perfect (0 mistakes, 0 hints)
 → box+1 (max 5). 1 mistake and no arrow hint → box unchanged (min 1). Otherwise → box = 0.
-`dueAt = now + BOX_INTERVAL_DAYS[box] days` (box 0 → due now). Weights: unseen 4, overdue
-`3 + daysOverdue (cap 10)`, not due `0.3 / (box + 1)`. Avoid `avoidLineId` unless it is the only line.
+`dueAt = now + BOX_INTERVAL_DAYS[box] days` (box 0 → due now). "Due" for display, weighting and
+the Remembered bonus means due **today** (local calendar day), so practising a bit earlier each day
+still finds that day's reviews; the anti-farming rule keeps the exact timestamp. Weights: unseen 4,
+due today `max(3, 3 + daysOverdue)` (cap 10), not due `0.3 / (box + 1)`. Avoid `avoidLineId` unless
+it is the only line. Coach's Choice uses `pickLineBalanced` (otherwise a chapter with 80 lines
+crowds out one with 9). `percentMastered` is floored but at least 1 once a line is mastered.
 
 ## 2. Trainer (pure reducer) — `src/trainer/trainerReducer.ts`
 
@@ -187,18 +210,26 @@ known-bad, other-line and random-mode book-alt cases.
 - `levels.ts`: `levelForXp(xp): LevelInfo` — Pawn 0 ♟️, Knight 250 ♞, Bishop 600 ♝, Rook 1200 ♜,
   Queen 2500 ♛, King 5000 ♚, Grandmaster 10000 🏆, then "Grandmaster ★N" every +5000.
 - `rewards.ts` (pure): `computeLineReward(input: LineResultInput, profile: Profile, dailyGoalLines: number): { coins; breakdown; stars }`
-  - Line complete: `5 + min(userMoveCount, 15)` 🪙 (learn mode: half, rounded up, and nothing else below except daily goal)
+  - Line complete: `5 + min(userMoveCount, 15)` 🪙 (learn mode — "Show me the moves", or the arrow
+    hint on about half the moves or more (hintsUsed ≥ userMoveCount) — pays half, rounded up, "Learned
+    a line", and nothing else below except daily goal)
   - Perfect (0 mistakes, 0 hints): **+10** ⭐; stars: 3 perfect · 2 if ≤1 mistake and no arrow hint · else 1
-  - First completion of this line ever: **+10** ✨ "New line"
-  - Line was due (seen before, dueAt ≤ now) and perfect: **+5** 🧠 "Remembered it!"
-  - Combo ≥ 3 (consecutive perfect lines this session): **+5** 🔥 "Combo xN" (≥ 6: +10)
+  - First NON-learn completion of this line: **+10** ✨ "New line" (`LineStats.learnCompletions`)
+  - Line due today (seen before) and perfect, not practised in the last hour: **+5** 🧠 "Remembered it!"
+  - Combo ≥ 3 (consecutive perfect lines this session): **+5** ⚡ "Combo xN" (≥ 6: +10) — ⚡, as 🔥 is the streak
   - Opponent blunder punished (perfect line with an opponent ?/?? move): **+5** ⚔️
   - Daily goal reached by this line (distinct lines today == dailyGoalLines): **+30** 🎯, plus streak bonus
     `5 * min(streakDays, 7)` 📅
   - **Anti-farming**: if this same line was completed less than 60 minutes ago (lineStats.lastPracticed)
-    and it was not due, award a flat **2** 🪙 "Practice makes perfect" and no other bonuses; it still
-    updates line stats. The daily goal counts **distinct** lines per day (add optional
-    `distinctLineIds?: string[]` to `DailyState` if you need it — optional field only).
+    and it was not due (exact timestamp), award a flat **2** 🪙 "Practice makes perfect" and no other
+    bonuses; it still updates line stats. A farmed run may lower the box but never makes the line due
+    sooner (else "fail on purpose, then replay" would pay in full every other run). A line that is due
+    only because its last run failed pays in full for ONE quick retry (`quickRetryUsed`); failing
+    again and again pays 2. Exception: the first normal run right after a paid learn-mode run is
+    never farmed (`learnPending`; the completion screen promises bonus coins for it) — and failing
+    it doesn't make the line due again. The daily goal counts **distinct** lines per day
+    (`distinctLineIds`). After a parent lowers the goal, it shows "Play 1 new line to claim it" until
+    the next new line claims it.
 - `achievements.ts`: `ACHIEVEMENTS: AchievementDef[]` + `checkAchievements(profile, ctx): AchievementDef[]`
   (newly unlocked only). At least: first line, first perfect, 10/50/100 perfect, 10/50/200/500 lines,
   combo 5 / combo 10, 3/7/30-day streak, punish a blunder, master a whole chapter, master a whole
@@ -211,6 +242,15 @@ known-bad, other-line and random-mode book-alt cases.
   `resolveRedemption`, `adjustCoins`, daily rollover (`ensureDaily(profile, now)` resets `daily` on a new
   local date; streak continues if lastGoalDate was yesterday), history capping.
   Engine games: win 10 + (rating ≥ 1200 ? 10 : 0) + (rating ≥ 1600 ? 10 : 0), draw 5, max 3 rewarded games/day.
+  Parent safety: every "Forgot the PIN?" reset is recorded (`parent.pinResets`, add-only, merged on
+  backup import — an old backup can't hide one, and an import never replaces this device's PIN or
+  recovery code). With the recovery code (shown once when the first PIN is made) a new PIN is set
+  right away; without it the grown-up question (with a growing wait after wrong answers) only starts
+  a 24-hour wait that a parent can cancel, and approving rewards / gifting coins then pause for a
+  day. Wrong PINs and wrong answers survive a reload (side keys `opening-quest.pinlock` /
+  `opening-quest.adultcheck`, never in backups). The device clock being turned back is recorded
+  (`parent.clockJumps`) and shown to the parent. Parent undo: approve (10 s), gifts (coins + XP),
+  removals, backup restore (`opening-quest.v1.before-restore`).
 - `appStore.ts` (React): module-level store with `useSyncExternalStore`:
   `useAppData()`, `useActiveProfile()`, and an `actions` object wrapping profileOps +
   `selectProfile`, `signOut`, parent ops (`verifyPin`, `setPin`, `setReward`, `addReward`,
@@ -339,9 +379,11 @@ Navigation is a tiny state machine (`Screen` in types.ts) via `src/app/nav.tsx`
 ## 7. iPad / PWA
 
 `index.html`: viewport `width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no,
-viewport-fit=cover`; `apple-mobile-web-app-capable`, status bar `black-translucent`, title
+viewport-fit=cover`; `robots noindex`; `apple-mobile-web-app-capable`, status bar `black-translucent`, title
 "Opening Quest", `apple-touch-icon` (180 px PNG), `manifest.webmanifest` (standalone, icons
-192/512, theme colour). CSS: `overscroll-behavior: none`, no text selection / callouts on game
+192/512, theme colour; the apple-touch and maskable icons are fully opaque). The Home Screen app
+has its OWN storage (separate from Safari's): the Parent zone tells parents to export a backup in
+Safari and import it in the installed app. CSS: `overscroll-behavior: none`, no text selection / callouts on game
 UI, `touch-action: manipulation`, safe-area insets. Layout: landscape = board left (as large as
 fits: min(viewport height − top bar, 62vw)), panel right; portrait = board on top full-width,
 panel below. Test at 1180×820, 820×1180, 1366×1024 and 375×812.

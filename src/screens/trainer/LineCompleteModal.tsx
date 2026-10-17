@@ -100,7 +100,7 @@ export function LineCompleteModal({ open, outcome, effect, streak, onNext, onRet
               </Chip>
             ))}
             {showComboChip && (
-              <Chip tone="red" pop icon="🔥" style={{ ['--i' as string]: chips.length + 3 }}>
+              <Chip tone="red" pop icon="⚡" style={{ ['--i' as string]: chips.length + 3 }}>
                 Combo x{outcome.combo}
               </Chip>
             )}
@@ -170,7 +170,7 @@ export function LineCompleteModal({ open, outcome, effect, streak, onNext, onRet
         {r.farmed ? (
           <p className="lcm__note">You just played this line — a different one earns more coins! 🪙</p>
         ) : outcome.learnMode ? (
-          <p className="lcm__note">👀 You had the arrows on. Try it without them for ⭐ bonus coins!</p>
+          <p className="lcm__note">👀 You had the arrows on. Now play it without them — that run earns the ⭐ bonus coins!</p>
         ) : outcome.carried && !outcome.perfect ? (
           <p className="lcm__note">↻ Your earlier try at this line counts too. Next time, go for ⭐ Perfect in one go!</p>
         ) : outcome.mistakes > 0 ? (

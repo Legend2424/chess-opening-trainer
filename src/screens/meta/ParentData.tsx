@@ -2,27 +2,20 @@
 // change PIN, "install on iPad" tip, and the storage problem card.
 
 import { useEffect, useRef, useState, type ChangeEvent } from 'react'
+import type { AppData } from '../../types.ts'
 import { actions, useAppData, useStorageStatus } from '../../store/appStore.ts'
 import { parseBackup } from '../../store/storage.ts'
 import { localDateKey } from '../../store/defaults.ts'
 import { OPENINGS, STUDY_URL } from '../../data/openings.ts'
-import { useRepertoires } from '../../chess/useRepertoires.ts'
+import { chapterIdsIn, previewStudy, useRepertoires } from '../../chess/useRepertoires.ts'
 import { Button, Card, Chip, Modal, PinPad, toast } from '../../components/ui/index.ts'
 import { ConfirmModal, Banner, clockTime, plural, shortDate } from './common.tsx'
 import { lockoutText, useLockout } from './ParentGate.tsx'
+import { IS_IOS, isStandalone, newRecoveryCode } from './device.ts'
 
 // ---------------------------------------------------------------------------
 // Backup export / import
 // ---------------------------------------------------------------------------
-
-/** iPhone / iPad (iPadOS reports itself as a Mac with touch). */
-const IS_IOS: boolean = (() => {
-  try {
-    return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
-  } catch {
-    return false
-  }
-})()
 
 export function backupFileName(now: number = Date.now()): string {
   return `opening-quest-backup-${localDateKey(now)}.json`
@@ -119,8 +112,24 @@ function useBackupImport() {
     if (!pending) return
     const r = actions.importBackup(pending.text)
     setPending(null)
-    if (r.ok) toast.success('Backup restored!', '✅')
-    else toast.error(r.error ?? 'That backup could not be restored.')
+    if (r.ok) {
+      toast.show({
+        kind: 'success',
+        emoji: '✅',
+        message: 'Backup restored!',
+        duration: 8000,
+        action: actions.hasRestoreUndo()
+          ? {
+              label: 'Undo',
+              onClick: () => {
+                const u = actions.undoRestore()
+                if (u.ok) toast.success('Restore undone — everything is back as it was.', '↩️')
+                else toast.error(u.error ?? 'Could not undo the restore.')
+              },
+            }
+          : undefined,
+      })
+    } else toast.error(r.error ?? 'That backup could not be restored.')
   }
 
   const elements = (
@@ -142,7 +151,8 @@ function useBackupImport() {
             </p>
             <p>Players: {pending.players || '—'}</p>
             <p>
-              ⚠️ This <b>replaces all progress on this iPad</b> with the backup. The parent PIN stays the same.
+              ⚠️ This <b>replaces all progress on this iPad</b> with the backup. The parent PIN and recovery code stay the same. You can
+              undo it right after.
             </p>
           </>
         )}
@@ -241,11 +251,36 @@ export function DataSection() {
   )
 }
 
+/** What importing a study would do, per opening (built with the current training settings). */
+interface StudyPreview {
+  rows: Array<{ id: string; emoji: string; name: string; before: number; after: number; kept: number; added: number; missing: string[] }>
+  /** Some opening would lose lines or chapters. */
+  loses: boolean
+}
+
+function previewImport(text: string, data: AppData, current: ReturnType<typeof useRepertoires>): StudyPreview {
+  const reps = previewStudy(text, data.parent.maxPly, data.parent.enabledExtras)
+  let loses = false
+  const rows = reps.map((rep) => {
+    const o = rep.opening
+    const cur = current.byId[o.id]
+    const before = new Set((cur?.lines ?? []).map((l) => l.id))
+    const after = rep.lines.map((l) => l.id)
+    const kept = after.filter((id) => before.has(id)).length
+    const found = new Set(rep.chapters.map((c) => c.id))
+    const had = new Set((cur?.chapters ?? []).map((c) => c.id))
+    const missing = o.chapters.filter((c) => had.has(c.id) && !found.has(c.id)).map((c) => c.title)
+    if (missing.length > 0 || after.length < before.size) loses = true
+    return { id: o.id, emoji: o.emoji, name: o.name, before: before.size, after: after.length, kept, added: after.length - kept, missing }
+  })
+  return { rows, loses }
+}
+
 function StudyCard() {
   const data = useAppData()
   const reps = useRepertoires()
   const fileRef = useRef<HTMLInputElement>(null)
-  const [pending, setPending] = useState<{ text: string; name: string } | null>(null)
+  const [pending, setPending] = useState<{ text: string; name: string; preview: StudyPreview } | null>(null)
   const [revert, setRevert] = useState(false)
   const imported = data.studyOverride
 
@@ -253,15 +288,33 @@ function StudyCard() {
     const f = e.target.files?.[0]
     e.target.value = ''
     if (!f) return
+    let text = ''
     try {
-      const text = await f.text()
-      if (!/\[\w+\s+"/.test(text)) {
-        toast.error("That doesn't look like a PGN file.")
-        return
-      }
-      setPending({ text, name: f.name })
+      text = await f.text()
     } catch {
       toast.error("Couldn't read that file.")
+      return
+    }
+    if (!/\[\w+\s+"/.test(text)) {
+      toast.error("That doesn't look like a PGN file.")
+      return
+    }
+    try {
+      // The coach's chapters are found by their Lichess chapter ids.
+      const ids = chapterIdsIn(text)
+      const known = OPENINGS.flatMap((o) => [...o.chapters, ...o.extraChapters]).filter((c) => ids.has(c.id))
+      if (known.length === 0) {
+        toast.show({
+          kind: 'error',
+          title: "This file has none of the coach's chapters.",
+          message: 'On Lichess, download the WHOLE study (all chapters), not a single chapter.',
+          duration: 7000,
+        })
+        return
+      }
+      setPending({ text, name: f.name, preview: previewImport(text, data, reps) })
+    } catch {
+      toast.error("Couldn't read that study file.")
     }
   }
 
@@ -336,8 +389,10 @@ function StudyCard() {
       <ConfirmModal
         open={!!pending}
         title="Use this study file?"
-        confirmLabel="Import"
+        confirmLabel={pending?.preview.loses ? 'Import anyway' : 'Import'}
         icon="📥"
+        variant={pending?.preview.loses ? 'danger' : 'primary'}
+        size="md"
         onCancel={() => setPending(null)}
         onConfirm={() => {
           if (!pending) return
@@ -352,7 +407,22 @@ function StudyCard() {
             <p>
               <b>{pending.name}</b> ({Math.round(pending.text.length / 1024)} KB)
             </p>
-            <p>Lines that are the same as before keep their progress; new or changed lines start fresh.</p>
+            <ul className="pz-preview">
+              {pending.preview.rows.map((r) => (
+                <li key={r.id}>
+                  {r.emoji} <b>{r.name}</b>: {r.before} → <b>{r.after}</b> lines ({r.kept} kept, {r.added} new)
+                  {r.missing.length > 0 && <> — ⚠️ missing: {r.missing.join(', ')}</>}
+                </li>
+              ))}
+            </ul>
+            {pending.preview.loses ? (
+              <p>
+                ⚠️ <b>Some lines or chapters would disappear</b> — is this the whole study (all chapters)? Their progress is kept and
+                comes back with “Revert to bundled”.
+              </p>
+            ) : (
+              <p>Lines that are the same as before keep their progress; new or changed lines start fresh.</p>
+            )}
           </>
         )}
       </ConfirmModal>
@@ -401,13 +471,32 @@ function BackupCard() {
           Download the file instead of sharing
         </button>
       )}
+      {actions.hasRestoreUndo() && (
+        <div className="pz-row-btns">
+          <Button
+            variant="secondary"
+            size="sm"
+            icon="↩️"
+            onClick={() => {
+              const u = actions.undoRestore()
+              if (u.ok) toast.success('Restore undone — everything is back as it was.', '↩️')
+              else toast.error(u.error ?? 'Could not undo the restore.')
+            }}
+          >
+            Undo the last restore
+          </Button>
+        </div>
+      )}
       {backup.elements}
     </Card>
   )
 }
 
 function PinCard() {
+  const data = useAppData()
   const [open, setOpen] = useState(false)
+  const [code, setCode] = useState<string | null>(null)
+  const hasCode = !!data.parent.recoveryHash
   return (
     <Card padding="sm" className="pz-card">
       <h2 className="meta-section-title">🔑 Parent PIN</h2>
@@ -417,29 +506,76 @@ function PinCard() {
           Change PIN
         </Button>
       </div>
+      <p className="pz-help">
+        <b>Recovery code:</b>{' '}
+        {hasCode
+          ? '✅ set. If the PIN is forgotten, it sets a new one right away.'
+          : 'none yet. Without it, “Forgot the PIN?” makes you wait 24 hours (so a kid can’t simply change it).'}
+      </p>
+      <div className="pz-row-btns">
+        <Button variant="secondary" icon="🧾" onClick={() => setCode(newRecoveryCode())}>
+          {hasCode ? 'Make a new recovery code' : 'Make a recovery code'}
+        </Button>
+      </div>
       <ChangePinModal open={open} onClose={() => setOpen(false)} />
+      <ConfirmModal
+        open={code !== null}
+        title="🔑 Your new recovery code"
+        confirmLabel="I wrote it down"
+        icon="✓"
+        onCancel={() => setCode(null)}
+        onConfirm={() => {
+          if (!code) return
+          const r = actions.setRecoveryCode(code)
+          setCode(null)
+          if (r.ok) toast.success(hasCode ? 'New recovery code saved — the old one no longer works.' : 'Recovery code saved.', '🔑')
+          else toast.error(r.message ?? 'Could not save the code.')
+        }}
+      >
+        <p className="pz-recovery-code num">{code}</p>
+        <p>
+          Write it down and keep it away from the kids. It only works after you tap <b>I wrote it down</b>
+          {hasCode ? ' (then the old code stops working)' : ''}.
+        </p>
+      </ConfirmModal>
     </Card>
   )
 }
 
 function InstallCard() {
-  let standalone = false
-  try {
-    standalone =
-      window.matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone === true
-  } catch {
-    standalone = false
-  }
+  const standalone = isStandalone()
+  const fresh = useAppData().profiles.every((p) => p.xp === 0)
   return (
     <Card padding="sm" className="pz-card">
       <h2 className="meta-section-title">📲 Install on iPad</h2>
       {standalone ? (
-        <p className="pz-help">✅ Opening Quest is on the Home Screen — great! Still export a backup now and then.</p>
+        <>
+          <p className="pz-help">✅ Opening Quest is on the Home Screen — great! Still export a backup now and then.</p>
+          {fresh && (
+            <p className="pz-help">
+              <b>Coming from Safari?</b> The Home Screen app has its own, separate storage: import the backup you exported there
+              (Backup → Import backup).
+            </p>
+          )}
+        </>
       ) : (
-        <p className="pz-help">
-          In Safari tap <b>Share</b> → <b>Add to Home Screen</b>. The app then opens full-screen, and Safari is much less likely to
-          clear the kids' saved progress (websites that aren't on the Home Screen can lose their data).
-        </p>
+        <>
+          <p className="pz-help">
+            On the Home Screen the app opens full-screen and Safari won't clear the kids' progress. <b>But the Home Screen app has its
+            own, separate storage</b> — progress made here in Safari does not appear there by itself. So:
+          </p>
+          <ol className="pz-steps">
+            <li>
+              <Button size="sm" variant="primary" icon="📤" onClick={() => void runExport(true)}>
+                Export a backup
+              </Button>
+            </li>
+            <li>
+              In Safari tap <b>Share</b> → <b>Add to Home Screen</b>.
+            </li>
+            <li>Open the new icon, create a PIN, then Data → Backup → <b>Import backup</b>.</li>
+          </ol>
+        </>
       )}
     </Card>
   )

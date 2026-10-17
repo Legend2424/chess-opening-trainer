@@ -4,11 +4,14 @@ import {
   BOX_INTERVAL_DAYS,
   DAY_MS,
   isDue,
+  isDueToday,
   isMastered,
   lineWeight,
   openingProgress,
   pickLine,
+  pickLineBalanced,
   seededRng,
+  startOfNextLocalDay,
   updateLineStats,
 } from '../src/chess/scheduler.ts'
 import type { Line, LineStats } from '../src/types.ts'
@@ -66,7 +69,13 @@ test('isMastered / isDue', () => {
   assert.equal(isMastered(stats({ box: 5 })), true)
   assert.equal(isDue(undefined, NOW), true, 'unseen counts as due')
   assert.equal(isDue(stats({ dueAt: NOW }), NOW), true)
-  assert.equal(isDue(stats({ dueAt: NOW + 1 }), NOW), false)
+  // Due = due TODAY (local day): a review later today already counts (review fix: code #2).
+  const midnight = startOfNextLocalDay(NOW)
+  assert.ok(midnight > NOW && midnight - NOW <= DAY_MS + 3600_000)
+  assert.equal(isDue(stats({ dueAt: midnight - 1 }), NOW), true)
+  assert.equal(isDueToday(stats({ dueAt: midnight - 1 }), NOW), true)
+  assert.equal(isDue(stats({ dueAt: midnight }), NOW), false)
+  assert.equal(isDue(stats({ dueAt: NOW + DAY_MS }), NOW), false)
 })
 
 test('perfect: box + 1 (max 5), dueAt = now + interval, counters', () => {
@@ -129,7 +138,9 @@ test('weights: unseen 4, overdue 3 + days (cap 10), not due 0.3/(box+1)', () => 
   assert.equal(lineWeight(stats({ dueAt: NOW - 2 * DAY_MS }), NOW), 5)
   assert.equal(lineWeight(stats({ dueAt: NOW - 1.5 * DAY_MS }), NOW), 4.5)
   assert.equal(lineWeight(stats({ dueAt: NOW - 30 * DAY_MS }), NOW), 10)
-  assert.equal(lineWeight(stats({ box: 0, dueAt: NOW + 1 }), NOW), 0.3)
+  assert.equal(lineWeight(stats({ box: 0, dueAt: NOW + DAY_MS }), NOW), 0.3)
+  // Due later today: weighted like a line that is due now.
+  assert.equal(lineWeight(stats({ box: 1, dueAt: startOfNextLocalDay(NOW) - 1 }), NOW), 3)
   assert.ok(Math.abs(lineWeight(stats({ box: 2, dueAt: NOW + DAY_MS }), NOW) - 0.1) < 1e-12)
   assert.ok(Math.abs(lineWeight(stats({ box: 5, dueAt: NOW + DAY_MS }), NOW) - 0.05) < 1e-12)
 })
@@ -200,6 +211,37 @@ test('openingProgress', () => {
   const three = lines.slice(0, 3)
   const r = openingProgress(three, { a: stats({ box: 3, dueAt: NOW + 1 }), b: stats({ box: 4, dueAt: NOW + 1 }) }, NOW)
   assert.equal(r.percentMastered, 66)
+  // The first mastered line shows at least 1% (not 0% for days).
+  const many = Array.from({ length: 154 }, (_, i) => fakeLine(`m${i}`))
+  assert.equal(openingProgress(many, { m0: stats({ box: 3, dueAt: NOW + 4 * DAY_MS }) }, NOW).percentMastered, 1)
+})
+
+test('pickLineBalanced: each chapter gets a fair share, whatever its size (review: kid #4)', () => {
+  const inCh = (id: string, ch: string): Line => ({ ...fakeLine(id), chapterId: ch })
+  const pool = [
+    ...Array.from({ length: 80 }, (_, i) => inCh(`big${i}`, 'closed')),
+    ...Array.from({ length: 10 }, (_, i) => inCh(`small${i}`, 'open')),
+    inCh('solo', 'side'),
+  ]
+  const rng = seededRng(99)
+  const n = 9000
+  const byCh: Record<string, number> = { closed: 0, open: 0, side: 0 }
+  for (let i = 0; i < n; i++) byCh[pickLineBalanced(pool, {}, NOW, { rng }).chapterId]++
+  for (const k of Object.keys(byCh)) assert.ok(Math.abs(byCh[k] / n - 1 / 3) < 0.03, `${k}: ${byCh[k] / n}`)
+  // Plain pickLine is proportional to the number of lines (what Coach's Choice did before).
+  const plain: Record<string, number> = { closed: 0, open: 0, side: 0 }
+  for (let i = 0; i < n; i++) plain[pickLine(pool, {}, NOW, { rng }).chapterId]++
+  assert.ok(plain.closed / n > 0.8)
+  // Chapter weight = its most urgent line: a chapter with nothing due is rare.
+  const st2: Record<string, LineStats> = {}
+  for (let i = 0; i < 10; i++) st2[`small${i}`] = stats({ box: 3, dueAt: NOW + 3 * DAY_MS })
+  const w: Record<string, number> = { closed: 0, open: 0, side: 0 }
+  for (let i = 0; i < n; i++) w[pickLineBalanced(pool, st2, NOW, { rng }).chapterId]++
+  assert.ok(w.open / n < 0.02, `open: ${w.open / n}`)
+  // avoidLineId still works, and a lone line is returned.
+  for (let i = 0; i < 300; i++) assert.notEqual(pickLineBalanced(pool, {}, NOW, { rng, avoidLineId: 'solo' }).id, 'solo')
+  assert.equal(pickLineBalanced([pool[0]], {}, NOW, { rng, avoidLineId: pool[0].id }).id, pool[0].id)
+  assert.throws(() => pickLineBalanced([], {}, NOW))
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

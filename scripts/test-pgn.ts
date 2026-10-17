@@ -230,11 +230,11 @@ test('[%cal]/[%csl] with multiple entries and all four colours', () => {
 })
 
 test('[%clk]/[%eval]/[%emt]/[%anno ...] are stripped from text', () => {
-  const r = parseCommentCommands('[%clk 0:10:00] [%eval 0.25] [%anno "BigCeej", bigceej] Nice move [%emt 0:00:05] [%eval #-3,20]')
+  const r = parseCommentCommands('[%clk 0:10:00] [%eval 0.25] [%anno "SomeCoach", somecoach] Nice move [%emt 0:00:05] [%eval #-3,20]')
   assert.equal(r.text, 'Nice move')
   assert.deepEqual(r.arrows, [])
   assert.deepEqual(r.highlights, [])
-  const g = one('1. Nf3 { [%clk 1:59:55] } 1... d5 { [%clk 1:58:46] } 2. d4 { [%anno "csconradie", csconradie] df } *')
+  const g = one('1. Nf3 { [%clk 1:59:55] } 1... d5 { [%clk 1:58:46] } 2. d4 { [%anno "testuser", testuser] df } *')
   assert.equal(parseCommentCommands(g.roots[0].comments[0]).text, '')
   assert.equal(parseCommentCommands(g.roots[0].children[0].children[0].comments[0]).text, 'df')
 })
@@ -301,14 +301,16 @@ test('unplayable SAN skips the branch with a warning, keeps the rest', () => {
 })
 
 test('comments on nodes become MoveNode.comment / arrows / highlights; intro on chapter', () => {
-  const rep = buildOne('{ Hi [%csl Ge4] } 1. e4 { Center! [%cal Gd2d4] } { more } e5 { [%clk 0:01:00] } *')
+  const rep = buildOne('{ Hello [%csl Ge4] } 1. e4 { Center! [%cal Gd2d4] } { more } e5 { [%clk 0:01:00] } Nf3 { df } *')
   const ch = rep.chapters[0]
-  assert.equal(ch.intro, 'Hi')
+  assert.equal(ch.intro, 'Hello')
   assert.deepEqual(ch.introHighlights, [{ square: 'e4', color: 'green' }])
   const e4 = ch.roots[0]
   assert.equal(e4.comment, 'Center! more')
   assert.deepEqual(e4.arrows, [{ from: 'd2', to: 'd4', color: 'green' }])
   assert.equal(e4.children[0].comment, undefined)
+  // A stray keystroke (fewer than 3 letters) is not a coach comment (review: chess #9).
+  assert.equal(e4.children[0].children[0].comment, undefined)
 })
 
 // ---------------------------------------------------------------------------
@@ -377,7 +379,10 @@ if (existsSync(RAW)) {
     const ids = games.map(chapterIdOf)
     assert.ok(ids.every((x) => x && x.length === 8))
     assert.equal(new Set(ids).size, 53)
-    const { result: rep, warnings } = silenceWarnings(() => buildRepertoire(allChaptersDef(games), games, { maxPly: 0, enabledExtras: [] }))
+    // Parsing fidelity: build WITHOUT the study overrides (they cut/insert moves on purpose).
+    const { result: rep, warnings } = silenceWarnings(() =>
+      buildRepertoire(allChaptersDef(games), games, { maxPly: 0, enabledExtras: [], overrides: [] }),
+    )
     const t2 = performance.now()
     if (warnings.length) console.log(warnings.join('\n'))
     assert.equal(warnings.length, 0, 'unplayable SAN warnings')

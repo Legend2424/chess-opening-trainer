@@ -1,5 +1,6 @@
-import { Suspense, lazy, useEffect } from 'react'
+import { Suspense, lazy, useEffect, type ReactNode } from 'react'
 import { NavProvider, useNav } from './app/nav.tsx'
+import { ErrorBoundary } from './app/ErrorBoundary.tsx'
 import type { Screen } from './types.ts'
 import { useActiveProfile } from './store/appStore.ts'
 import { ToastViewport } from './components/ui/index.ts'
@@ -7,12 +8,18 @@ import ProfileSelect from './screens/ProfileSelect.tsx'
 import Home from './screens/Home.tsx'
 import OpeningScreen from './screens/OpeningScreen.tsx'
 import Trainer from './screens/Trainer.tsx'
-import Shop from './screens/Shop.tsx'
-import Trophies from './screens/Trophies.tsx'
-import Parent from './screens/Parent.tsx'
 
-// The engine screen pulls in the Stockfish wrapper; keep it out of the first load.
+// Screens a kid doesn't need on the first tap load on demand (smaller first
+// download). A chunk that fails to load (new deploy, offline) is retried once
+// with a page reload (main.tsx) and otherwise caught by the ErrorBoundary.
 const PlayComputer = lazy(() => import('./screens/PlayComputer.tsx'))
+const Shop = lazy(() => import('./screens/Shop.tsx'))
+const Trophies = lazy(() => import('./screens/Trophies.tsx'))
+const Parent = lazy(() => import('./screens/Parent.tsx'))
+
+function Lazy({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<div className="screen-loading">Loading…</div>}>{children}</Suspense>
+}
 
 // Screen conventions (every screen file default-exports its component):
 //  - screens with parameters receive them as `params` (the matching Screen variant);
@@ -39,16 +46,28 @@ function CurrentScreen() {
     case 'train':
       return <Trainer key={JSON.stringify(screen)} params={screen} />
     case 'shop':
-      return <Shop params={screen} />
+      return (
+        <Lazy>
+          <Shop params={screen} />
+        </Lazy>
+      )
     case 'trophies':
-      return <Trophies />
+      return (
+        <Lazy>
+          <Trophies />
+        </Lazy>
+      )
     case 'parent':
-      return <Parent />
+      return (
+        <Lazy>
+          <Parent />
+        </Lazy>
+      )
     case 'play':
       return (
-        <Suspense fallback={<div className="screen-loading">Loading…</div>}>
+        <Lazy>
           <PlayComputer key={JSON.stringify(screen)} params={screen} />
-        </Suspense>
+        </Lazy>
       )
   }
 }
@@ -57,9 +76,11 @@ export default function App() {
   const profile = useActiveProfile()
   const initial: Screen = profile ? { name: 'home' } : { name: 'profiles' }
   return (
-    <NavProvider initial={initial}>
-      <CurrentScreen />
-      <ToastViewport />
-    </NavProvider>
+    <ErrorBoundary>
+      <NavProvider initial={initial}>
+        <CurrentScreen />
+        <ToastViewport />
+      </NavProvider>
+    </ErrorBoundary>
   )
 }

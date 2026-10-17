@@ -1,9 +1,9 @@
 // Screen 4 — the trainer (DESIGN.md §6.4): big board + Hoot's panel.
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { Arrow, BoardThemeId, Highlight, PieceSetId, Screen } from '../types.ts'
+import type { Arrow, BoardThemeId, Highlight, Line, PieceSetId, Screen } from '../types.ts'
 import { useNav } from '../app/nav.tsx'
 import { useRepertoire } from '../chess/useRepertoires.ts'
-import { bookMovesAt } from '../chess/repertoire.ts'
+import { bookMovesAt, isDubious } from '../chess/repertoire.ts'
 import { isDue } from '../chess/scheduler.ts'
 import { openingById } from '../data/openings.ts'
 import { actions, useActiveProfile } from '../store/appStore.ts'
@@ -12,10 +12,10 @@ import { levelForXp } from '../store/levels.ts'
 import { titleText } from '../store/catalog.ts'
 import { setMuted } from '../fx/sound.ts'
 import { ChessBoard } from '../components/ChessBoard.tsx'
-import { Button, Chip, TopBar, cx } from '../components/ui/index.ts'
-import { currentNode, expectedNode, userMoveIndex } from '../trainer/trainerReducer.ts'
+import { Button, Chip, Modal, TopBar, cx } from '../components/ui/index.ts'
+import { expectedNode, shownNode, tailPending, userMoveIndex } from '../trainer/trainerReducer.ts'
 import { useTrainer } from '../trainer/useTrainer.ts'
-import { CoachBubble } from './trainer/CoachBubble.tsx'
+import { CoachBubble, type ForkInfo } from './trainer/CoachBubble.tsx'
 import { ProgressDots } from './trainer/ProgressDots.tsx'
 import { MoveList } from './trainer/MoveList.tsx'
 import { LineCompleteModal } from './trainer/LineCompleteModal.tsx'
@@ -56,7 +56,7 @@ export default function Trainer({ params }: { params: TrainParams }) {
       const r = state.feedback?.kind === 'known-bad' ? state.feedback.refutation : undefined
       return r ? [{ from: r.from, to: r.to, color: 'red' }] : NO_ARROWS
     }
-    const node = currentNode(state)
+    const node = shownNode(state)
     const coach = node ? node.arrows : state.ply === 0 ? (chapter?.introArrows ?? []) : []
     // Never let a coach arrow give away the user's next move (unless they asked for it).
     let secret: { from: string; to: string }[] = []
@@ -66,6 +66,9 @@ export default function Trainer({ params }: { params: TrainParams }) {
         const up = state.line.moves[state.ply + 1]
         if (up && up.color === t.userColor) secret = [up]
       }
+    } else if (expected) {
+      // The answer is shown (yellow): other study moves drawn green next to it would only confuse.
+      secret = bookMovesAt(rep, state.fen).filter((n) => n.color === t.userColor && n.uci !== expected.uci)
     }
     const out: Arrow[] = []
     for (const a of coach) {
@@ -79,12 +82,31 @@ export default function Trainer({ params }: { params: TrainParams }) {
 
   const highlights = useMemo<Highlight[]>(() => {
     if (!state || state.phase === 'wrongMove') return NO_HIGHLIGHTS
-    const node = currentNode(state)
+    const node = shownNode(state)
     if (node) return node.highlights
     return state.ply === 0 ? (chapter?.introHighlights ?? NO_HIGHLIGHTS) : NO_HIGHLIGHTS
   }, [state, chapter])
 
-  const hintSquare = state && state.phase === 'userToMove' && state.hintLevel >= 1 && expected && !t.learnMode ? expected.from : null
+  // In-order / chapter practice where the study has 2+ good moves and this line wants the
+  // less usual one: say so BEFORE the move (and glow it for free), instead of refusing the
+  // other good move as "a different line" afterwards.
+  const fork = useMemo<ForkInfo | null>(() => {
+    if (!state || !rep || !expected || state.phase !== 'userToMove' || params.mode === 'random') return null
+    const good = bookMovesAt(rep, state.fen).filter((n) => n.color === t.userColor && !isDubious(n))
+    if (good.length < 2 || good[0].uci === expected.uci || !good.some((n) => n.uci === expected.uci)) return null
+    // Same piece, other square: glow the target square, else the piece.
+    const samePiece = good.some((n) => n.uci !== expected.uci && n.from === expected.from)
+    return { count: good.length, square: samePiece ? expected.to : expected.from, target: samePiece }
+  }, [state, rep, expected, params.mode, t.userColor])
+
+  let hintSquare: string | null = null
+  if (state && state.phase === 'userToMove' && expected && !t.learnMode) {
+    if (state.hintLevel >= 1) hintSquare = expected.from
+    else if (fork) hintSquare = fork.square
+  }
+
+  // Coach's Choice: which chapters the opponent may still steer into.
+  const lineById = useMemo(() => new Map<string, Line>((rep?.lines ?? []).map((l) => [l.id, l])), [rep])
 
   // Tapping the board while a wrong move is shown takes it back (ignoring the
   // tail of the tap/drag that made the move).
@@ -112,11 +134,18 @@ export default function Trainer({ params }: { params: TrainParams }) {
   }
 
   // ---- navigation ------------------------------------------------------------------
-  const exit = () => nav.back()
+  // Leaving a few moves into a line asks first (it starts again from move 1 next time).
+  const [askLeave, setAskLeave] = useState(false)
+  const exit = () => {
+    if (state && state.phase !== 'complete' && userMoveIndex(state) >= RESTART_CONFIRM_FROM) setAskLeave(true)
+    else nav.back()
+  }
   const playOn = () => {
     if (!def) return
     const fen = t.outcome?.fen ?? state?.fen
-    nav.go({ name: 'play', fen, userColor: def.side, openingId: def.id })
+    // Replace (not push): "Back" from the game then goes to the opening, not to a
+    // trainer that has already moved on to its next line.
+    nav.replace({ name: 'play', fen, userColor: def.side, openingId: def.id })
   }
   const goHome = () => nav.reset({ name: 'home' })
 
@@ -201,12 +230,24 @@ export default function Trainer({ params }: { params: TrainParams }) {
   // ---- ready ----------------------------------------------------------------------
   const { phase } = state
   const line = state.line
-  const stats = profile.lineStats[line.id]
-  const isNew = !stats || stats.completions === 0
+  // Stats as they were when this run started: finishing the line mustn't flip NEW → Review.
+  const stats = t.runStats[line.id]
+  // "New" until the first run without learn mode (that run still earns the New-line bonus).
+  const isNew = !stats || stats.completions - (stats.learnCompletions ?? 0) <= 0
   const isReview = !isNew && isDue(stats, now)
-  const lineName = displayLineName(line, state.ply, phase === 'complete', t.userColor)
+  // Coach's Choice hides where the robot is heading: the chapter only once it is certain,
+  // no line name and no total until the very end.
+  const mystery = params.mode === 'random' && phase !== 'complete'
+  let chapterTitle = line.chapterTitle
+  let lineName = displayLineName(line, state.ply, phase === 'complete', t.userColor)
+  if (mystery) {
+    const chapters = new Set(state.candidates.map((id) => lineById.get(id)?.chapterId ?? line.chapterId))
+    chapterTitle = chapters.size <= 1 ? line.chapterTitle : 'Mystery line ❓'
+    lineName = ''
+  }
   const current = phase === 'complete' ? -1 : userMoveIndex(state)
   const doneMoves = state.userMoveMarks.filter((m) => m !== 'pending').length
+  const showTotal = !mystery || state.candidates.length <= 1
 
   let modeLabel: string
   if (params.mode === 'random') modeLabel = "🎲 Coach's Choice"
@@ -247,12 +288,16 @@ export default function Trainer({ params }: { params: TrainParams }) {
     )
   } else if (phase === 'complete') {
     controls = (
-      <div className="trainer__controls">
-        <Button variant="primary" size="lg" shine icon="▶" className="trainer__grow" onClick={t.nextLine}>
+      // Three tiles like Hint / Restart / Learn, so "Next line" never gets squeezed.
+      <div className="trainer__controls trainer__controls--tiles">
+        <Button variant="primary" size="md" shine icon="▶" onClick={t.nextLine}>
           {t.outcome?.wrapped ? 'Start again' : 'Next line'}
         </Button>
         <Button variant="secondary" size="md" icon="↻" onClick={t.restart}>
-          <span className="trainer__btn-text">Try again</span>
+          Try again
+        </Button>
+        <Button variant="secondary" size="md" icon="🤖" onClick={playOn} aria-label="Play on against the robot">
+          Play on
         </Button>
       </div>
     )
@@ -322,13 +367,15 @@ export default function Trainer({ params }: { params: TrainParams }) {
             <div className="trainer__head-top">
               <span className="trainer__mode">{modeLabel}</span>
               <span className="spacer" />
+              {/* ⚡ for the combo: 🔥 is the daily streak (top bar). */}
               <span
                 className={cx('trainer__combo', t.combo >= 3 && 'is-hot', t.combo === 0 && 'is-off')}
                 title="Perfect lines in a row"
+                role="img"
                 aria-label={`Combo: ${t.combo} perfect lines in a row`}
                 key={`combo${t.combo}`}
               >
-                <span aria-hidden>🔥</span>x{t.combo}
+                <span aria-hidden>⚡</span>x{t.combo}
               </span>
               {t.sessionCoins > 0 && (
                 <span className="trainer__session" title="Coins earned this session">
@@ -337,11 +384,15 @@ export default function Trainer({ params }: { params: TrainParams }) {
               )}
             </div>
             <div className="trainer__title">
-              <span className="trainer__chapter">{line.chapterTitle}</span>
-              <span className="trainer__sep" aria-hidden>
-                ·
-              </span>
-              <span className="trainer__line-name">{lineName}</span>
+              <span className="trainer__chapter">{chapterTitle}</span>
+              {lineName && (
+                <>
+                  <span className="trainer__sep" aria-hidden>
+                    ·
+                  </span>
+                  <span className="trainer__line-name">{lineName}</span>
+                </>
+              )}
               {isNew && (
                 <Chip tone="gold" icon="✨" className="trainer__badge">
                   NEW
@@ -359,15 +410,24 @@ export default function Trainer({ params }: { params: TrainParams }) {
               )}
             </div>
             <div className="trainer__progress">
-              <ProgressDots marks={state.userMoveMarks} current={current} />
-              <span className="trainer__count num">
-                {doneMoves}/{state.userMoveMarks.length}
-              </span>
+              {/* While the robot can still pick a longer or shorter line, don't show how many moves are left. */}
+              <ProgressDots marks={showTotal ? state.userMoveMarks : state.userMoveMarks.slice(0, doneMoves + 1)} current={current} />
+              <span className="trainer__count num">{showTotal ? `${doneMoves}/${state.userMoveMarks.length}` : `${doneMoves} ✓`}</span>
             </div>
           </div>
 
           <div className="trainer__talk">
-            <CoachBubble state={state} feedback={t.feedback} insight={t.insight} learnMode={t.learnMode} intro={chapter?.intro} />
+            <CoachBubble
+              state={state}
+              feedback={t.feedback}
+              insight={t.insight}
+              learnMode={t.learnMode}
+              intro={chapter?.intro}
+              rep={rep}
+              mode={params.mode}
+              fork={fork}
+              tailShowing={state.tailPly > 0 || tailPending(state)}
+            />
           </div>
 
           <MoveList
@@ -393,6 +453,37 @@ export default function Trainer({ params }: { params: TrainParams }) {
         onHome={goHome}
         onClose={t.closeComplete}
       />
+
+      <Modal
+        open={askLeave}
+        onClose={() => setAskLeave(false)}
+        size="sm"
+        title="Leave this line? 🚪"
+        footerCenter
+        footer={
+          <>
+            <Button variant="primary" icon="♟️" onClick={() => setAskLeave(false)} data-autofocus>
+              Keep playing
+            </Button>
+            <Button
+              variant="secondary"
+              icon="🚪"
+              onClick={() => {
+                setAskLeave(false)
+                nav.back()
+              }}
+            >
+              Leave
+            </Button>
+          </>
+        }
+      >
+        <p className="trainer__confirm">
+          {params.mode === 'random'
+            ? 'This line stops here — next time Hoot picks a line for you again.'
+            : "You'll start this line again from move 1 next time."}
+        </p>
+      </Modal>
     </div>
   )
 }

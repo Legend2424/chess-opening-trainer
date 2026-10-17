@@ -38,13 +38,12 @@ export function SpeechBubble({
           {speaker}
         </span>
       )}
-      <div
-        key={animateKey}
-        className={cx('bubble', tone !== 'default' && `bubble--${tone}`, animateKey !== undefined && 'anim-pop')}
-        role="status"
-        aria-live="polite"
-      >
-        {children}
+      {/* The live region stays mounted (screen readers announce changes inside it);
+          only the bubble inside is re-keyed to replay its pop-in animation. */}
+      <div className="bubble-live" role="status" aria-live="polite">
+        <div key={animateKey} className={cx('bubble', tone !== 'default' && `bubble--${tone}`, animateKey !== undefined && 'anim-pop')}>
+          {children}
+        </div>
       </div>
     </div>
   )

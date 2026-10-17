@@ -3,7 +3,8 @@
 // friendly prompt.
 import type { ReactNode } from 'react'
 import { SpeechBubble, type SpeechBubbleProps } from '../../components/ui/index.ts'
-import { moveLabel } from '../../chess/repertoire.ts'
+import { isBlunder, moveLabel, positionKey } from '../../chess/repertoire.ts'
+import type { Repertoire, TrainerMode } from '../../types.ts'
 import type { Feedback, TrainerState } from '../../trainer/trainerReducer.ts'
 import type { MistakeInsight } from '../../trainer/useTrainer.ts'
 import {
@@ -12,10 +13,20 @@ import {
   YOUR_MOVE_LINES,
   insightText,
   lastOpponentMove,
+  openingNorms,
   pickBy,
   recentNotes,
+  tailNotes,
   type CoachNote,
 } from './messages.ts'
+
+/** The study has several good moves here and this line practises a less usual one. */
+export interface ForkInfo {
+  count: number
+  /** Square glowing for free (the piece, or the target square when the same piece has another good move). */
+  square: string
+  target: boolean
+}
 
 export interface CoachBubbleProps {
   state: TrainerState
@@ -24,6 +35,11 @@ export interface CoachBubbleProps {
   learnMode: boolean
   /** Chapter intro (shown before the first move). */
   intro?: string
+  rep?: Repertoire | null
+  mode?: TrainerMode
+  fork?: ForkInfo | null
+  /** The line is complete and its "what happens next" tail is (about to be) shown. */
+  tailShowing?: boolean
   className?: string
 }
 
@@ -42,25 +58,72 @@ function notesKey(notes: CoachNote[]): string {
   return notes.map((n) => n.id).join(',')
 }
 
-function buildModel({ state, feedback: fb, insight, learnMode, intro }: CoachBubbleProps): Model {
+/**
+ * A line that starts differently from the opening's usual start (1.f4 / 1.d4 in
+ * the Sicilian, or the kid's side answering 1.e4 with something else): say so.
+ */
+function surprise({ state, rep, mode }: CoachBubbleProps): ReactNode | null {
+  if (!rep || state.phase !== 'userToMove') return null
+  const u = state.config.userColor
+  const norms = openingNorms(rep)
+  const first = state.line.moves[0]
+  const firstUserIdx = state.line.moves.findIndex((m) => m.color === u)
+  // Only at the kid's FIRST move of the line.
+  if (firstUserIdx < 0 || state.ply !== firstUserIdx) return null
+  if (first && first.color !== u && norms.firstOpponent && first.uci !== norms.firstOpponent.uci) {
+    return (
+      <>
+        Surprise! Your opponent didn't play <b className="coach__move">{moveLabel(norms.firstOpponent)}</b> — your coach has an answer for
+        this too!
+      </>
+    )
+  }
+  // In Coach's Choice any of the coach's first moves is accepted, so nothing to warn about there.
+  const exp = state.line.moves[firstUserIdx]
+  const usual = norms.firstUser.get(positionKey(exp.fenBefore))
+  if (mode !== 'random' && usual && usual.uci !== exp.uci) {
+    const opp = lastOpponentMove(state)
+    return opp ? (
+      <>
+        This time your coach answers <b className="coach__move">{moveLabel(opp)}</b> with <b className="coach__move">{moveLabel(exp)}</b>!
+      </>
+    ) : (
+      <>
+        This time your coach starts with <b className="coach__move">{moveLabel(exp)}</b>!
+      </>
+    )
+  }
+  return null
+}
+
+function buildModel(props: CoachBubbleProps): Model {
+  const { state, feedback: fb, insight, learnMode, intro, fork, tailShowing } = props
   const notes = recentNotes(state)
   const opp = lastOpponentMove(state)
 
   if (state.phase === 'wrongMove') {
     if (fb?.kind === 'known-bad') {
       const r = fb.refutation
+      const coach = fb.node?.comment
+      // ?! = dubious, not losing: gentler, and no "your opponent can answer…".
+      const severe = !!fb.node && (isBlunder(fb.node) || !!r)
       return {
         key: `kb${fb.id}`,
         tone: 'error',
         speaker: '🦉',
-        headline: 'Oops! Your coach marked this move as a mistake.',
-        body: r ? (
+        headline: severe ? 'Oops! That move is a known mistake.' : 'Hmm — your coach knows a better move here.',
+        body: (
           <>
-            Watch out — your opponent can answer <b className="coach__move">{moveLabel(r)}</b> (the red arrow). Take it back and find a
-            better move!
+            {coach && <span className="coach__insight">Coach says: “{coach}” </span>}
+            {severe && r ? (
+              <>
+                Watch out — your opponent can answer <b className="coach__move">{moveLabel(r)}</b> (the red arrow). Take it back and find a
+                better move!
+              </>
+            ) : (
+              "Take it back and let's find the coach's move!"
+            )}
           </>
-        ) : (
-          "Take it back and let's find a better move!"
         ),
       }
     }
@@ -84,6 +147,41 @@ function buildModel({ state, feedback: fb, insight, learnMode, intro }: CoachBub
   }
 
   if (state.phase === 'complete') {
+    if (tailShowing && state.line.tail) {
+      const shown = tailNotes(state)
+      if (state.line.tailIsTrap) {
+        const tail = state.line.tail
+        const bad = tail.find((m) => m.color === state.config.userColor)
+        const answer = bad ? tail[tail.indexOf(bad) + 1] : undefined
+        return {
+          key: `trap${state.tailPly}`,
+          tone: 'gold',
+          speaker: '🦉',
+          headline: '🎉 Line complete! Now watch out for this trap:',
+          body: bad ? (
+            <>
+              Don't play <b className="coach__move">{moveLabel(bad)}</b> here
+              {answer ? (
+                <>
+                  {' '}
+                  — <b className="coach__move">{moveLabel(answer)}</b> punishes it!
+                </>
+              ) : (
+                ' — your coach marked it as a mistake!'
+              )}
+            </>
+          ) : undefined,
+          notes: shown,
+        }
+      }
+      return {
+        key: `tail${state.tailPly}`,
+        tone: 'success',
+        speaker: '🦉',
+        headline: '🎉 Line complete! Here is how your coach goes on:',
+        notes: shown,
+      }
+    }
     return { key: `done${fb?.id ?? 0}`, tone: 'success', speaker: '🦉', headline: '🎉 You did it — line complete!', notes }
   }
 
@@ -116,6 +214,26 @@ function buildModel({ state, feedback: fb, insight, learnMode, intro }: CoachBub
         state.hintLevel >= 2
           ? '💡 Follow the yellow arrow!'
           : '💡 Here’s a clue: the glowing piece is the one to move. Where does it go?',
+      notes,
+    }
+  }
+
+  const surpriseText = surprise(props)
+  if (surpriseText) {
+    return { key: `sur${state.line.id}`, tone: 'gold', speaker: '🦉', headline: surpriseText, notes }
+  }
+
+  if (fork && state.phase === 'userToMove' && !learnMode && state.hintLevel === 0) {
+    return {
+      key: `fork${state.ply}${fork.square}`,
+      tone: 'info',
+      speaker: '🦉',
+      headline: `🔀 Your study has ${fork.count} good moves here — this line practises a different one than usual.`,
+      body: (
+        <span className="coach__tip">
+          {fork.target ? 'The glowing square shows where this line goes. ✨' : 'The glowing piece is the one this line moves. ✨'}
+        </span>
+      ),
       notes,
     }
   }

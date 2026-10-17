@@ -3,7 +3,7 @@
 // Item cards with live previews, rarity glow, price and Buy / Equip state.
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import type { CatalogItem, EffectId, ItemKind, Profile, Screen } from '../types.ts'
+import type { AchievementDef, CatalogItem, EffectId, ItemKind, LevelInfo, Profile, Screen } from '../types.ts'
 import { useNav } from '../app/nav.tsx'
 import { actions, useActiveProfile, useParentSettings } from '../store/appStore.ts'
 import { isEquipped, levelOf } from '../store/profileOps.ts'
@@ -53,7 +53,12 @@ export default function Shop({ params }: { params: Extract<Screen, { name: 'shop
   const nav = useNav()
   const now = useNow()
   const [tab, setTab] = useState<ShopTab>(() => (params.tab && TAB_IDS.includes(params.tab) ? params.tab : 'board'))
-  const [buying, setBuying] = useState<{ item: CatalogItem; phase: 'confirm' | 'done' } | null>(null)
+  const [buying, setBuying] = useState<{
+    item: CatalogItem
+    phase: 'confirm' | 'done'
+    /** Shown as toasts once the "It's yours!" window closes (toasts would cover its title). */
+    after?: { achievements: AchievementDef[]; levelUp: { from: LevelInfo; to: LevelInfo } | null }
+  } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   // Every tab starts at its top (the scroll area is shared by all tabs).
   const changeTab = (t: ShopTab) => {
@@ -100,13 +105,20 @@ export default function Shop({ params }: { params: Extract<Screen, { name: 'shop
     }
     sfx.purchase()
     void celebrate(profile.equipped.effect, { intensity: 0.7 })
-    toast.show({ kind: 'success', emoji: item.emoji, title: `${item.name} is yours!`, message: 'Spent wisely! 🛍️', sound: false })
-    for (const a of r.newAchievements) toast.achievement(`${a.name} unlocked!`, `${a.description} +${a.coins} coins`, a.emoji)
-    if (r.levelUp) {
-      sfx.levelUp()
-      toast.show({ kind: 'achievement', emoji: r.levelUp.to.emoji, title: 'Level up!', message: `You're now a ${r.levelUp.to.name}!`, sound: false })
+    // The window itself says "now in your collection"; badges / level-up follow when it closes.
+    if (r.levelUp) sfx.levelUp()
+    setBuying({ item, phase: 'done', after: { achievements: r.newAchievements, levelUp: r.levelUp } })
+  }
+
+  /** Close the buy window; after a purchase, show what it unlocked (toasts would have covered its title). */
+  const closeBuying = () => {
+    const after = buying?.phase === 'done' ? buying.after : undefined
+    setBuying(null)
+    if (!after) return
+    for (const a of after.achievements) toast.achievement(`${a.name} unlocked!`, `${a.description} +${a.coins} coins`, a.emoji)
+    if (after.levelUp) {
+      toast.show({ kind: 'achievement', emoji: after.levelUp.to.emoji, title: 'Level up!', message: `You're now a ${after.levelUp.to.name}!`, sound: false })
     }
-    setBuying({ item, phase: 'done' })
   }
 
   return (
@@ -142,16 +154,17 @@ export default function Shop({ params }: { params: Extract<Screen, { name: 'shop
           item={buying.item}
           phase={buying.phase}
           profile={profile}
-          onCancel={() => setBuying(null)}
+          onCancel={closeBuying}
           onConfirm={() => confirmBuy(buying.item)}
           onEquip={() => {
-            if (equip(buying.item)) setBuying(null)
+            if (equip(buying.item)) closeBuying()
           }}
           onShelf={() => {
-            setBuying(null)
+            closeBuying()
             // Remember this tab so "back" from the shelf lands where the kid was.
             nav.replace({ name: 'shop', tab })
-            nav.go({ name: 'trophies' })
+            // Came from the shelf? Go back to it rather than stacking another one.
+            nav.goOrPop({ name: 'trophies' })
           }}
         />
       )}

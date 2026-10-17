@@ -9,7 +9,7 @@ import { levelOf, pendingRedemptions } from '../../store/profileOps.ts'
 import { itemsOfKind } from '../../store/catalog.ts'
 import { levelForXp } from '../../store/levels.ts'
 import { DEFAULT_MAX_PLY, OPENINGS } from '../../data/openings.ts'
-import { useRepertoires } from '../../chess/useRepertoires.ts'
+import { previewRepertoire, useRepertoires } from '../../chess/useRepertoires.ts'
 import { Avatar, Button, Card, Chip, CoinBadge, Modal, Toggle, cx, toast } from '../../components/ui/index.ts'
 import { ConfirmModal, plural, timeAgo, useNow } from './common.tsx'
 
@@ -105,6 +105,8 @@ type PendingEntry = ReturnType<typeof pendingRedemptions>[number]
 
 /** How long an answered request stays in place (buttons gone) before it leaves the list. */
 const SETTLED_MS = 1600
+/** An approved request stays a little longer, with an "Undo" button. */
+const SETTLED_APPROVED_MS = 5000
 /** Approve/Decline taps are ignored this long after any answer (double-tap guard). */
 const TAP_GUARD_MS = 700
 
@@ -143,13 +145,24 @@ export function RequestsSection() {
     }
     setSettled((s) => [...s, { entry, approved: approve }])
     timers.current.push(
-      window.setTimeout(() => setSettled((s) => s.filter((x) => x.entry.redemption.id !== redemption.id)), SETTLED_MS),
+      window.setTimeout(
+        () => setSettled((s) => s.filter((x) => x.entry.redemption.id !== redemption.id)),
+        approve ? SETTLED_APPROVED_MS : SETTLED_MS,
+      ),
     )
     if (approve) toast.success(`Approved! Time to give ${name} the ${redemption.rewardName}.`, '✅')
     else toast.info(`Declined — ${name}'s coins went back.`, '↩️')
   }
   /** True when a tap lands too soon after the previous answer (likely a double tap). */
   const guarded = () => Date.now() < guardUntil.current
+
+  /** "Undo" a moment after approving: the request waits again. */
+  const undoApprove = (entry: PendingEntry) => {
+    const r = actions.unresolveRedemption(entry.profileId, entry.redemption.id)
+    setSettled((s) => s.filter((x) => x.entry.redemption.id !== entry.redemption.id))
+    if (r.ok) toast.info(`Undone — ${entry.profileName}'s request is waiting again.`, '↩️')
+    else toast.error(r.message ?? 'Too late to undo that one.')
+  }
 
   return (
     <div className="pz-stack">
@@ -181,6 +194,11 @@ export function RequestsSection() {
                   {done ? (
                     <span className="pz-req__done" role="status">
                       {approved ? '✅ Approved' : '↩️ Declined'}
+                      {approved && (
+                        <Button size="sm" variant="secondary" className="pz-req__undo" onClick={() => undoApprove(entry)}>
+                          Undo
+                        </Button>
+                      )}
                     </span>
                   ) : (
                     <div className="pz-req__actions">
@@ -448,7 +466,8 @@ export function CoinsSection() {
   return (
     <div className="pz-stack">
       <p className="pz-help pz-help--on-bg">
-        Gifts count toward the kid's level (like earned coins). Removing coins never goes below zero and doesn't lower the level.
+        Gifts count toward the kid's level (like earned coins). Removing coins never goes below zero and doesn't lower the level. Tap
+        “Undo” on the message right after a gift or removal to take it back.
       </p>
       <div className="pz-grid-2">
         {data.profiles.map((p) => (
@@ -469,12 +488,16 @@ function CoinsCard({ profile }: { profile: Profile }) {
   const n = toInt(amount)
   const valid = n >= 1 && n <= 100_000
 
+  const levelNow = levelOf(profile)
+  const levelAfter = levelForXp(profile.xp + (valid ? n : 0))
+
   const apply = (sign: 1 | -1, confirmed = false) => {
     if (!valid) {
       toast.error('Type how many coins (1 – 100,000).')
       return
     }
-    if (sign > 0 && n >= BIG_GIFT && !confirmed) {
+    // Big gifts, and any gift that would raise the level, ask first.
+    if (sign > 0 && (n >= BIG_GIFT || levelAfter.level > levelNow.level) && !confirmed) {
       setConfirmGift(true)
       return
     }
@@ -485,14 +508,47 @@ function CoinsCard({ profile }: { profile: Profile }) {
       toast.error(r.message ?? 'That did not work.')
       return
     }
-    if (sign > 0) toast.show({ kind: 'coin', title: `+${n.toLocaleString()} coins for ${profile.name}`, message: note.trim() || 'Gift from a parent', emoji: '🎁' })
-    else toast.info(`Removed ${plural(taken, 'coin')} from ${profile.name}.`, '➖')
+    const id = profile.id
+    const who = profile.name
+    if (sign > 0) {
+      toast.show({
+        kind: 'coin',
+        title: `+${n.toLocaleString()} coins for ${who}`,
+        message: note.trim() || 'Gift from a parent',
+        emoji: '🎁',
+        duration: 6000,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            const u = actions.undoGift(id, n)
+            if (u.ok) toast.info(`Gift undone — ${who}'s coins and level are back.`, '↩️')
+            else toast.error(u.message ?? 'Could not undo that.')
+          },
+        },
+      })
+    } else {
+      toast.show({
+        kind: 'info',
+        emoji: '➖',
+        message: `Removed ${plural(taken, 'coin')} from ${who}.`,
+        duration: 6000,
+        action:
+          taken > 0
+            ? {
+                label: 'Undo',
+                onClick: () => {
+                  // Giving back removed coins doesn't count toward the level.
+                  const u = actions.adjustCoins(id, taken, 'Removal undone', false)
+                  if (u.ok) toast.info(`${plural(taken, 'coin')} back for ${who}.`, '↩️')
+                  else toast.error(u.message ?? 'Could not undo that.')
+                },
+              }
+            : undefined,
+      })
+    }
     setAmount('')
     setNote('')
   }
-
-  const levelNow = levelOf(profile)
-  const levelAfter = levelForXp(profile.xp + (valid ? n : 0))
 
   return (
     <Card padding="sm" className="pz-card pz-coins">
@@ -537,7 +593,8 @@ function CoinsCard({ profile }: { profile: Profile }) {
         }}
       >
         <p>
-          That's a big gift for <b>{profile.name}</b>. Gifts count toward the level, and removing coins later does <b>not</b> lower it.
+          {valid && n >= BIG_GIFT ? <>That's a big gift for <b>{profile.name}</b>. </> : null}Gifts count toward the level, and removing
+          coins later does <b>not</b> lower it (only “Undo” right after the gift does).
         </p>
         {levelAfter.level > levelNow.level ? (
           <p>
@@ -548,7 +605,35 @@ function CoinsCard({ profile }: { profile: Profile }) {
           <p>{profile.name} stays at {levelNow.emoji} <b>{levelNow.name}</b>.</p>
         )}
       </ConfirmModal>
+      <RecentCoins profile={profile} />
     </Card>
+  )
+}
+
+/** The last 10 coin changes (earned, spent, gifts, removals), newest first. */
+function RecentCoins({ profile }: { profile: Profile }) {
+  const now = useNow()
+  const rows = profile.history.slice(0, 10)
+  return (
+    <div className="pz-coin-hist">
+      <span className="pz-field__label">Recent coins</span>
+      {rows.length === 0 ? (
+        <p className="pz-help">Nothing yet.</p>
+      ) : (
+        <ul className="pz-list pz-list--compact">
+          {rows.map((h, i) => (
+            <li key={`${h.at}-${i}`} className="pz-hist">
+              <span className={cx('pz-hist__delta', h.delta > 0 ? 'is-plus' : 'is-minus')}>
+                {h.delta > 0 ? '+' : ''}
+                {h.delta.toLocaleString()}
+              </span>
+              <span className="pz-hist__text">{h.reason}</span>
+              <span className="pz-hist__when">{timeAgo(h.at, now)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   )
 }
 
@@ -588,6 +673,34 @@ export function TrainingSection() {
     else toast.error(r.message ?? 'Could not change that.')
     setPending(null)
   }
+
+  // What the pending change would really do (built with the new setting, nothing applied).
+  const impact = useMemo(() => {
+    if (!pending || !reps.text) return null
+    const openingId = pending.kind === 'ply' ? pending.openingId : OPENINGS.find((o) => o.extraChapters.some((c) => c.id === pending.chapterId))?.id
+    const def = OPENINGS.find((o) => o.id === openingId)
+    const cur = openingId ? reps.byId[openingId] : undefined
+    if (!def || !cur) return null
+    try {
+      const ply = pending.kind === 'ply' ? pending.ply : (data.parent.maxPly[def.id] ?? DEFAULT_MAX_PLY)
+      const extras =
+        pending.kind === 'extra'
+          ? pending.on
+            ? [...data.parent.enabledExtras, pending.chapterId]
+            : data.parent.enabledExtras.filter((c) => c !== pending.chapterId)
+          : data.parent.enabledExtras
+      const next = previewRepertoire(reps.text, def, ply, extras)
+      const nextIds = new Set(next.lines.map((l) => l.id))
+      const curIds = new Set(cur.lines.map((l) => l.id))
+      const changed = cur.lines.filter((l) => !nextIds.has(l.id))
+      const added = next.lines.filter((l) => !curIds.has(l.id)).length
+      const practisedBy = data.profiles.filter((p) => changed.some((l) => p.lineStats[l.id]))
+      const practised = changed.filter((l) => data.profiles.some((p) => p.lineStats[l.id])).length
+      return { total: cur.lines.length, changed: changed.length, added, practised, who: practisedBy.map((p) => p.name).join(' and ') }
+    } catch {
+      return null
+    }
+  }, [pending, reps, data.parent, data.profiles])
 
   return (
     <div className="pz-stack">
@@ -659,6 +772,7 @@ export function TrainingSection() {
         title="Change the training lines?"
         confirmLabel="Yes, change it"
         variant="primary"
+        icon={pending?.kind === 'extra' ? '✓' : undefined}
         onCancel={() => setPending(null)}
         onConfirm={apply}
       >
@@ -676,10 +790,38 @@ export function TrainingSection() {
                 </>
               )}
             </p>
-            <p>
-              ⚠️ Lines that change count as new lines, so the kids' progress on <b>those lines starts over</b>. Coins, items and trophies
-              are kept.
-            </p>
+            {pending.kind === 'extra' ? (
+              <p>
+                {pending.on ? (
+                  <>Adds {impact ? plural(impact.added, 'line') : 'its lines'}; nothing is lost.</>
+                ) : (
+                  <>
+                    Hides {impact ? plural(impact.changed, 'line') : 'its lines'}. Their progress is kept and comes back if you turn it on
+                    again.
+                  </>
+                )}
+              </p>
+            ) : impact ? (
+              <p>
+                {impact.changed === 0 && impact.added === 0 ? (
+                  'No line changes.'
+                ) : (
+                  <>
+                    ⚠️ <b>
+                      {impact.changed} of {impact.total} lines change
+                    </b>
+                    {impact.practised > 0 ? ` (${impact.practised} already practised by ${impact.who})` : ''} and {plural(impact.added, 'line')}{' '}
+                    {impact.added === 1 ? 'is' : 'are'} new. A changed line counts as a new line: its progress starts over. Going back to the
+                    old length brings the old progress back. Coins, items and trophies are kept.
+                  </>
+                )}
+              </p>
+            ) : (
+              <p>
+                ⚠️ Lines that change count as new lines, so the kids' progress on <b>those lines starts over</b>. Coins, items and
+                trophies are kept.
+              </p>
+            )}
           </>
         )}
       </ConfirmModal>
@@ -714,8 +856,10 @@ function PlayerCard({ profile }: { profile: Profile }) {
   const rename = () => {
     const r = actions.renameProfile(profile.id, name)
     if (r.ok) toast.success(`Renamed to ${name.trim()}.`, '✏️')
-    else toast.error('Names need 1–20 letters.')
+    else toast.error(r.message ?? 'Names need 1–20 letters.')
   }
+  const waiting = profile.redemptions.filter((r) => r.status === 'pending')
+  const waitingCoins = waiting.reduce((s, r) => s + r.cost, 0)
 
   return (
     <Card padding="sm" className="pz-card pz-player">
@@ -779,6 +923,14 @@ function PlayerCard({ profile }: { profile: Profile }) {
           This wipes <b>all</b> of {profile.name}'s coins, items, trophies, achievements, streak and line progress. The name and
           colour stay.
         </p>
+        {waiting.length > 0 && (
+          <p>
+            ⚠️ <b>
+              {plural(waiting.length, 'waiting request')} ({plural(waitingCoins, 'coin')})
+            </b>{' '}
+            will be cancelled too.
+          </p>
+        )}
         <p>Tip: export a backup first (💾 Data tab).</p>
       </ConfirmModal>
       <ConfirmModal

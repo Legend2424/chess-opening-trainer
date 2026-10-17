@@ -1,0 +1,13 @@
+# Normalise line endings in the repo (LF), whatever core.autocrlf says.
+* text=auto eol=lf
+
+# Binary assets: never touch them.
+*.wasm binary
+*.nnue binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

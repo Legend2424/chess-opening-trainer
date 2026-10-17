@@ -14,6 +14,8 @@ export interface ToastOptions {
   duration?: number
   /** Play a matching sound (default true). */
   sound?: boolean
+  /** A button in the toast (e.g. "Undo"); tapping it runs onClick and closes the toast. */
+  action?: { label: string; onClick: () => void }
 }
 
 interface ToastItem extends ToastOptions {
@@ -120,6 +122,20 @@ export function ToastViewport() {
             {t.title != null && <div className="toast__title">{t.title}</div>}
             {t.message != null && <div className="toast__msg">{t.message}</div>}
           </div>
+          {t.action && (
+            <button
+              type="button"
+              className="toast__action"
+              onClick={(e) => {
+                e.stopPropagation()
+                const run = t.action!.onClick
+                dismiss(t.id)
+                run()
+              }}
+            >
+              {t.action.label}
+            </button>
+          )}
         </div>
       ))}
     </div>,

@@ -2,10 +2,12 @@
 // threefold repetition is detected), the robot's replies, undo, hint, resign.
 //
 // Engine etiquette (one shared Stockfish for the whole app):
-//  - playEngine() is called before EVERY robot move, because hint/judge
-//    queries switch the shared engine to full strength;
+//  - playEngine() sets the robot's strength before every robot move (hint /
+//    mistake-check searches run at full strength; the engine sends each
+//    search's own Skill Level, so they never change the robot's);
 //  - every request carries a generation number; undo / new game / unmount
-//    bump it and call stopEngine(), so a late reply is simply ignored.
+//    bump it and call stopEngine() (which cancels the running AND the queued
+//    searches), so a late reply is simply ignored.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Chess } from 'chess.js'
 import {
@@ -61,10 +63,10 @@ const HINT_DEPTH = 12
 const HINT_TIMEOUT_MS = 12000
 const MOVE_TIME_MS = 1500
 /**
- * Engine still 'loading' after this long -> offer "Restart app". The engine
- * service never reports a worker that fails to load (no onerror / timeout in
- * Engine.init), so without this the screen would wait forever. The load keeps
- * going in the background: if it does finish, the game simply carries on.
+ * Engine still 'loading' after this long -> offer "Restart app". Engine.init
+ * itself rejects when the worker fails to load or after 60 s (status 'error');
+ * this earlier hint is only for the kid's patience on a slow connection. The
+ * load keeps going in the background: if it does finish, the game carries on.
  */
 export const ENGINE_LOAD_SLOW_MS = 30000
 

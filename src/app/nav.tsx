@@ -5,6 +5,11 @@ interface NavValue {
   screen: Screen
   /** Push a new screen. */
   go: (s: Screen) => void
+  /**
+   * Go to a screen that may already be in the history (Shop ⇄ Trophies): pop back to it
+   * (showing `s`) instead of stacking it again, so the history can't grow without end.
+   */
+  goOrPop: (s: Screen) => void
   /** Replace the current screen (no history entry). */
   replace: (s: Screen) => void
   /** Pop back to the previous screen (falls back to home/profiles). */
@@ -19,6 +24,14 @@ export function NavProvider({ initial, children }: { initial: Screen; children: 
   const [stack, setStack] = useState<Screen[]>([initial])
 
   const go = useCallback((s: Screen) => setStack((st) => [...st, s]), [])
+  const goOrPop = useCallback(
+    (s: Screen) =>
+      setStack((st) => {
+        const i = st.findIndex((x) => x.name === s.name)
+        return i >= 0 ? [...st.slice(0, i), s] : [...st, s]
+      }),
+    [],
+  )
   const replace = useCallback((s: Screen) => setStack((st) => [...st.slice(0, -1), s]), [])
   const reset = useCallback((s: Screen) => setStack([s]), [])
   const back = useCallback(
@@ -32,8 +45,8 @@ export function NavProvider({ initial, children }: { initial: Screen; children: 
   )
 
   const value = useMemo<NavValue>(
-    () => ({ screen: stack[stack.length - 1], go, replace, back, reset }),
-    [stack, go, replace, back, reset],
+    () => ({ screen: stack[stack.length - 1], go, goOrPop, replace, back, reset }),
+    [stack, go, goOrPop, replace, back, reset],
   )
   return <NavContext.Provider value={value}>{children}</NavContext.Provider>
 }

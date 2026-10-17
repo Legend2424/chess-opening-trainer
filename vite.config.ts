@@ -1,14 +1,15 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// base: '/chess-endgame-trainer/' makes it work under a GitHub Pages project path.
-// For local dev and root-domain hosting (Netlify/Vercel) this is harmless.
+// `base` comes from DEPLOY_BASE: the GitHub Pages workflow sets it to "/<repo>/"
+// (project pages live under a sub-path); locally and on a root domain it is "/".
+// A missing trailing slash is added, so "/chess-opening-trainer" works too.
+// Stockfish is a classic web worker loaded from public/engine/ (not bundled).
 export default defineConfig({
-  base: process.env.DEPLOY_BASE ?? '/',
+  base: (process.env.DEPLOY_BASE ?? '/').replace(/\/?$/, '/'),
   plugins: [react()],
-  // Stockfish ships as a classic web worker in /public; nothing special needed,
-  // but we make sure Vite doesn't try to bundle it.
-  worker: {
-    format: 'es',
+  build: {
+    // The main chunk (React + chess.js + the trainer) is ~480 kB; warn only above 600.
+    chunkSizeWarningLimit: 600,
   },
 })
