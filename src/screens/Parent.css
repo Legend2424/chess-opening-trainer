@@ -728,3 +728,63 @@
 .pz-adult__btns .btn:only-child {
   max-width: 260px;
 }
+
+/* ------------------------------------------------- active time per player */
+.pz-time {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 4px 14px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: #f4f6ff;
+  border: 2px solid #e0e6ff;
+}
+.pz-time__nums {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-weight: 700;
+  color: var(--c-ink-2);
+}
+.pz-time__nums b {
+  font-family: var(--font-head);
+  font-weight: 600;
+  color: var(--c-ink);
+}
+.pz-time__bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 64px;
+}
+.pz-time__bar {
+  position: relative;
+  width: 14px;
+  height: 48px;
+  margin-bottom: 16px;
+  border-radius: 6px;
+  background: #e3e8fb;
+  display: flex;
+  align-items: flex-end;
+}
+.pz-time__fill {
+  width: 100%;
+  min-height: 0;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #818cf8 0%, #6c4bf4 100%);
+}
+.pz-time__day {
+  position: absolute;
+  bottom: -17px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: var(--c-muted);
+}
+.pz-time__note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.78rem;
+}

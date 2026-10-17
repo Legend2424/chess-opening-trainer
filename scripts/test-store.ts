@@ -14,6 +14,8 @@ import { ACHIEVEMENTS, checkAchievements } from '../src/store/achievements.ts'
 import type { LineResultInputX } from '../src/store/achievements.ts'
 import * as ops from '../src/store/profileOps.ts'
 import * as storage from '../src/store/storage.ts'
+import { ActivityClock, gapCredit } from '../src/store/activityClock.ts'
+import { addActiveTime, formatDuration, formatDurationShort, MAX_TIME_CREDIT_MS, normTimeSpent, TIME_BY_DAY_KEEP, timeSummary } from '../src/store/timeSpent.ts'
 import type { KeyValueStorage } from '../src/store/storage.ts'
 
 // ---------------------------------------------------------------------------
@@ -1601,6 +1603,123 @@ await test('appStore: unreadable save is never overwritten; dismissLoadIssue sta
   assert.equal(mem.getItem(storage.CORRUPT_KEY), original)
   unsub()
   storage.setStorageBackend(undefined)
+})
+
+// ---------------------------------------------------------------------------
+// Active time on the app
+// ---------------------------------------------------------------------------
+
+await test('activity clock: gaps count in full up to the cap, then only the cap', () => {
+  const MINUTE = 60_000
+  const c = new ActivityClock()
+  c.tap(1000, MINUTE) // not running yet: first activity just starts the clock
+  assert.equal(c.peek(), 0)
+  assert.ok(c.running)
+  c.tap(1000 + 20_000, MINUTE) // 20 s of play
+  c.tap(1000 + 20_000 + 45_000, MINUTE) // 45 s thinking
+  assert.equal(c.peek(), 65_000)
+  c.tap(1000 + 65_000 + 10 * MINUTE, MINUTE) // left the iPad for 10 min: only 1 min counts
+  assert.equal(c.peek(), 65_000 + MINUTE)
+  assert.equal(c.take(), 125_000)
+  assert.equal(c.take(), 0)
+  // stop() counts the tail (capped) and nothing after it
+  c.stop(1000 + 65_000 + 10 * MINUTE + 5_000, MINUTE)
+  assert.equal(c.peek(), 5_000)
+  assert.ok(!c.running)
+  c.tap(10 * 60 * MINUTE, MINUTE) // resumes later: restarts, credits nothing for the pause
+  assert.equal(c.peek(), 5_000)
+  // start() lets the first tap credit the reading time (capped)
+  const d = new ActivityClock()
+  d.start(0)
+  d.tap(30_000, MINUTE)
+  assert.equal(d.take(), 30_000)
+  // the clock going backwards never subtracts
+  assert.equal(gapCredit(5000, 1000, MINUTE), 0)
+  assert.equal(gapCredit(0, Number.NaN, MINUTE), 0)
+  assert.equal(gapCredit(0, 90_000, 120_000), 90_000)
+})
+
+await test('addActiveTime books per local day, keeps a total and prunes old days', () => {
+  let d = fresh()
+  d = addActiveTime(d, 'david', 90_000, NOW).data
+  d = addActiveTime(d, 'david', 30_000, NOW + HOUR).data
+  d = addActiveTime(d, 'david', 60_000, NOW + DAY).data
+  const p = ops.getProfile(d, 'david')!
+  assert.equal(p.timeSpent!.totalMs, 180_000)
+  assert.equal(p.timeSpent!.byDay[localDateKey(NOW)], 120_000)
+  assert.equal(p.timeSpent!.byDay[localDateKey(NOW + DAY)], 60_000)
+  assert.equal(ops.getProfile(d, 'minka')!.timeSpent, undefined) // separate per kid
+  // junk and absurd amounts
+  assert.equal(addActiveTime(d, 'david', -5, NOW).data, d)
+  assert.equal(addActiveTime(d, 'david', Number.NaN, NOW).data, d)
+  assert.equal(addActiveTime(d, 'nobody', 1000, NOW).ok, false)
+  const big = addActiveTime(d, 'david', 5 * HOUR, NOW).data
+  assert.equal(ops.getProfile(big, 'david')!.timeSpent!.totalMs, 180_000 + MAX_TIME_CREDIT_MS)
+  // only the most recent TIME_BY_DAY_KEEP days are kept per day; the total keeps everything
+  let e = fresh()
+  for (let i = 0; i < TIME_BY_DAY_KEEP + 5; i++) e = addActiveTime(e, 'minka', 60_000, NOW - i * DAY).data
+  const m = ops.getProfile(e, 'minka')!.timeSpent!
+  assert.equal(Object.keys(m.byDay).length, TIME_BY_DAY_KEEP)
+  assert.equal(m.totalMs, (TIME_BY_DAY_KEEP + 5) * 60_000)
+  assert.ok(m.byDay[localDateKey(NOW)])
+  assert.equal(m.byDay[localDateKey(NOW - (TIME_BY_DAY_KEEP + 2) * DAY)], undefined)
+})
+
+await test('time summary: today, last 7 days and total; formatting', () => {
+  let d = fresh()
+  d = addActiveTime(d, 'david', 10 * 60_000, NOW).data
+  d = addActiveTime(d, 'david', 10 * 60_000, NOW - 3 * DAY).data
+  d = addActiveTime(d, 'david', 10 * 60_000, NOW - 3 * DAY + HOUR).data
+  d = addActiveTime(d, 'david', 9 * 60_000, NOW - 8 * DAY).data // outside the week
+  const s = timeSummary(ops.getProfile(d, 'david')!, NOW)
+  assert.equal(s.todayMs, 10 * 60_000)
+  assert.equal(s.weekMs, 30 * 60_000)
+  assert.equal(s.totalMs, 39 * 60_000)
+  assert.equal(s.days.length, 7)
+  assert.equal(s.days[6].date, localDateKey(NOW))
+  assert.equal(s.days[3].ms, 20 * 60_000)
+  const none = timeSummary(ops.getProfile(fresh(), 'minka')!, NOW)
+  assert.deepEqual([none.totalMs, none.todayMs, none.weekMs], [0, 0, 0])
+  assert.equal(formatDuration(59_999), '<1 min')
+  assert.equal(formatDuration(0), '0 min')
+  assert.equal(formatDuration(12 * 60_000), '12 min')
+  assert.equal(formatDuration(65 * 60_000), '1 h 5 min')
+  assert.equal(formatDuration(3 * HOUR), '3 h')
+  assert.equal(formatDuration(Number.NaN), '0 min')
+  assert.deepEqual(
+    [0, 5_000, 45 * 60_000, 105 * 60_000, 12 * HOUR + 35 * 60_000, 2 * HOUR, 123.75 * HOUR].map(formatDurationShort),
+    ['0m', '<1m', '45m', '1h 45m', '12h 35m', '2h', '123h'],
+  )
+})
+
+await test('time spent survives save/reload and backups, is validated, and is kept by Reset progress', () => {
+  let d = addActiveTime(fresh(), 'david', 10 * 60_000, NOW).data
+  d = addActiveTime(d, 'david', 10 * 60_000, NOW + 1).data
+  d = addActiveTime(d, 'david', 5 * 60_000, NOW + 2).data
+  const v = storage.validateAppData(JSON.parse(JSON.stringify(d)), NOW)
+  assert.ok(v.ok)
+  if (v.ok) assert.deepEqual(ops.getProfile(v.data, 'david')!.timeSpent, ops.getProfile(d, 'david')!.timeSpent)
+  const parsed = storage.parseBackup(storage.exportBackup(d, NOW), NOW)
+  assert.ok(parsed.ok)
+  if (parsed.ok) assert.equal(ops.getProfile(parsed.data, 'david')!.timeSpent!.totalMs, 25 * 60_000)
+  // broken entries are dropped / repaired, never crash
+  assert.equal(normTimeSpent(null), undefined)
+  assert.equal(normTimeSpent({ totalMs: 'x', byDay: [] }), undefined)
+  // absurd numbers and impossible dates from a hand-edited backup are clamped / dropped
+  const huge = normTimeSpent({ totalMs: 1e300, byDay: { '2026-10-14': 1e308, '2026-10-13': 1e308, '9999-99-99': 5, '2026-02-31': 5 } })!
+  assert.ok(Number.isFinite(huge.totalMs))
+  assert.deepEqual(Object.keys(huge.byDay).sort(), ['2026-10-13', '2026-10-14'])
+  assert.equal(huge.byDay['2026-10-14'], 24 * HOUR)
+  assert.deepEqual(normTimeSpent({ totalMs: 5, byDay: { '2026-10-14': 60_000, nope: 5, '2026-10-13': -4 } }), {
+    totalMs: 60_000, // never less than the days add up to
+    byDay: { '2026-10-14': 60_000 },
+  })
+  d = ops.adjustCoins(d, 'david', 300, 'gift', NOW, true).data
+  const r = ops.resetProfile(d, 'david', NOW)
+  assert.ok(r.ok)
+  const p = ops.getProfile(r.data, 'david')!
+  assert.equal(p.coins, 0)
+  assert.equal(p.timeSpent!.totalMs, 25 * 60_000)
 })
 
 // ---------------------------------------------------------------------------

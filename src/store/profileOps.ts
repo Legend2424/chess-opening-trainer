@@ -636,6 +636,8 @@ export function resetProfile(data: AppData, profileId: string, now: number): OpR
   if (!p) return fail(data, 'no-profile')
   const seed = defaultSeedFor(p.id) ?? { id: p.id, name: p.name, avatar: '🦉', color: p.color }
   const fresh = createProfile({ id: p.id, name: p.name, avatar: seed.avatar, color: p.color }, now)
+  // Time on the app is a record for the parent, not progress: keep it.
+  if (p.timeSpent) fresh.timeSpent = p.timeSpent
   return { data: withProfile(data, fresh), ok: true }
 }
 

@@ -200,6 +200,16 @@ export interface ProfileSettings {
   learnMode: boolean // "Show me the moves" default for new sessions
 }
 
+/**
+ * Active time on the app (src/store/activityClock.ts): every tap/move adds the
+ * time since the previous one, capped, so a forgotten open app doesn't count.
+ */
+export interface TimeSpent {
+  totalMs: number
+  /** Local 'YYYY-MM-DD' -> ms (most recent TIME_BY_DAY_KEEP days kept). */
+  byDay: Record<string, number>
+}
+
 export interface Profile {
   id: string // 'david' | 'minka'
   name: string
@@ -221,6 +231,8 @@ export interface Profile {
   history: CoinEvent[] // newest first, capped at 200
   settings: ProfileSettings
   createdAt: number
+  /** Active time on the app; absent until the first counted minute. Kept through "Reset progress". */
+  timeSpent?: TimeSpent
 }
 
 export interface ParentSettings {

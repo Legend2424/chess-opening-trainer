@@ -65,3 +65,12 @@ Home Screen app (the Parent zone's Data tab walks you through it).
 When the first parent PIN is created, the app shows a **recovery code** once: write it down. With it a
 forgotten PIN can be replaced right away; without it "Forgot the PIN?" makes you wait 24 hours (so the
 kids can't simply change it).
+
+## Time on the app
+
+Each player's **active** time is counted (Home goal card, Trophies, Parent zone → Players).
+Every tap, move or key press adds the time since the previous one, but at most **1 minute**
+(**2 minutes** when playing the robot, where real thinking takes longer). So an iPad left open on
+the table stops adding time. Nothing is counted while the app is in the background or the iPad is
+locked, on the "Who's playing?" screen, or in the Parent zone. Logic: `src/store/activityClock.ts`
+and `src/app/activityTracker.ts`; storage: `src/store/timeSpent.ts`. "Reset progress" keeps it.

@@ -7,6 +7,7 @@ import type { OpeningDef, Redemption } from '../types.ts'
 import { useNav } from '../app/nav.tsx'
 import { actions, useActiveProfile, useParentSettings, useStorageStatus } from '../store/appStore.ts'
 import { currentStreak, dailyGoalProgress } from '../store/profileOps.ts'
+import { formatDuration, timeSummary } from '../store/timeSpent.ts'
 import { OPENINGS } from '../data/openings.ts'
 import { useRepertoires } from '../chess/useRepertoires.ts'
 import { openingProgress } from '../chess/scheduler.ts'
@@ -146,7 +147,7 @@ function HomeView({ onRetry }: { onRetry: () => void }) {
               <span className="home__hello">{greeting(profile.name, new Date(now).getHours())}</span>
               <span className="home__nudge">{nudge(goal, dueTotal)}</span>
             </SpeechBubble>
-            <GoalCard done={goal.done} goal={goal.goal} met={goal.met} streak={streak} />
+            <GoalCard done={goal.done} goal={goal.goal} met={goal.met} streak={streak} todayMs={timeSummary(profile, now).todayMs} />
           </section>
 
           <section className="home__openings" aria-label="Your openings">
@@ -209,7 +210,7 @@ function nudge(goal: { done: number; goal: number; met: boolean }, due: number):
   return 'Ready to practise? Pick an opening below!'
 }
 
-function GoalCard({ done, goal, met, streak }: { done: number; goal: number; met: boolean; streak: number }) {
+function GoalCard({ done, goal, met, streak, todayMs }: { done: number; goal: number; met: boolean; streak: number; todayMs: number }) {
   return (
     <Card className="home-goal anim-pop" padding="sm">
       <ProgressRing
@@ -233,8 +234,13 @@ function GoalCard({ done, goal, met, streak }: { done: number; goal: number; met
         <span className="home-goal__sub">
           {met ? 'Done! 🎉' : done >= goal ? 'Play 1 new line to claim it!' : `${done} of ${plural(goal, 'line')}`}
         </span>
-        <span className={streak > 0 ? 'home-goal__streak' : 'home-goal__streak is-off'}>
-          🔥 {streak > 0 ? `${streak}-day streak` : 'Start a streak!'}
+        <span className="home-goal__chips">
+          <span className={streak > 0 ? 'home-goal__streak' : 'home-goal__streak is-off'}>
+            🔥 {streak > 0 ? `${streak}-day streak` : 'Start a streak!'}
+          </span>
+          <span className="home-goal__time" title="Time on the app today">
+            ⏱️ {formatDuration(todayMs)}
+          </span>
         </span>
       </div>
     </Card>

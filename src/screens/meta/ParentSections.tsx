@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Profile, RewardDef } from '../../types.ts'
 import { actions, useAppData } from '../../store/appStore.ts'
 import { levelOf, pendingRedemptions } from '../../store/profileOps.ts'
+import { formatDuration, timeSummary } from '../../store/timeSpent.ts'
 import { itemsOfKind } from '../../store/catalog.ts'
 import { levelForXp } from '../../store/levels.ts'
 import { DEFAULT_MAX_PLY, OPENINGS } from '../../data/openings.ts'
@@ -872,6 +873,7 @@ function PlayerCard({ profile }: { profile: Profile }) {
           </span>
         </div>
       </div>
+      <PlayerTime profile={profile} />
       <div className="pz-reward__row">
         <Field label="Name" className="pz-field--grow">
           <input className="pz-input" value={name} onChange={(e) => setName(e.target.value)} maxLength={20} />
@@ -950,5 +952,40 @@ function PlayerCard({ profile }: { profile: Profile }) {
         <p>This can't be undone (unless you have a backup).</p>
       </ConfirmModal>
     </Card>
+  )
+}
+
+/**
+ * Active time on the app: every tap or move adds the time since the previous
+ * one, but at most 1 minute (2 vs the robot), so an iPad left open doesn't count.
+ */
+function PlayerTime({ profile }: { profile: Profile }) {
+  const now = useNow(60_000)
+  const t = timeSummary(profile, now)
+  const max = Math.max(...t.days.map((d) => d.ms), 1)
+  const dayName = (date: string) => new Date(`${date}T12:00:00`).toLocaleDateString(undefined, { weekday: 'narrow' })
+  return (
+    <div className="pz-time" aria-label={`${profile.name}'s time on the app`}>
+      <div className="pz-time__nums">
+        <span>
+          <b>{formatDuration(t.todayMs)}</b> today
+        </span>
+        <span>
+          <b>{formatDuration(t.weekMs)}</b> this week
+        </span>
+        <span>
+          <b>{formatDuration(t.totalMs)}</b> in total
+        </span>
+      </div>
+      <div className="pz-time__bars" role="img" aria-label="Minutes per day, last 7 days">
+        {t.days.map((d) => (
+          <span key={d.date} className="pz-time__bar" title={`${d.date}: ${formatDuration(d.ms)}`}>
+            <span className="pz-time__fill" style={{ height: `${Math.round((d.ms / max) * 100)}%` }} />
+            <span className="pz-time__day">{dayName(d.date)}</span>
+          </span>
+        ))}
+      </div>
+      <p className="pz-help pz-time__note">⏱️ Active time only: idle gaps count at most 1 minute (2 vs the robot).</p>
+    </div>
   )
 }

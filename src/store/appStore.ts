@@ -15,6 +15,7 @@ import type {
 } from '../types.ts'
 import type { LineResultInputX } from './achievements.ts'
 import * as ops from './profileOps.ts'
+import { addActiveTime as addActiveTimeOp } from './timeSpent.ts'
 import type { EngineGameOutcome, OpError, OpResult, ShopResult } from './profileOps.ts'
 import type { EngineResult } from './rewards.ts'
 import {
@@ -342,6 +343,14 @@ export const actions = {
   refreshDaily(): void {
     const now = Date.now()
     commit(ops.trackClock(ops.rolloverAll(getAppData(), now), now))
+  },
+  /**
+   * Book active time for a player (from src/app/activityTracker.ts). Doesn't
+   * touch the parent session. `immediate` writes to storage now (page hiding).
+   */
+  addActiveTime(profileId: string, ms: number, immediate = false): void {
+    const r = addActiveTimeOp(getAppData(), profileId, ms, Date.now())
+    if (r.ok) commit(r.data, immediate)
   },
 
   // --- training --------------------------------------------------------

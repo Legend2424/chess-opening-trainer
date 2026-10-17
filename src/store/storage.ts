@@ -12,7 +12,9 @@ import type {
   ProfileSettings,
   Redemption,
   RewardDef,
+  TimeSpent,
 } from '../types.ts'
+import { normTimeSpent } from './timeSpent.ts'
 import { findItem, itemById, DEFAULT_EQUIPPED, FREE_ITEM_IDS } from './catalog.ts'
 import {
   createDefaultAppData,
@@ -338,7 +340,12 @@ function normProfile(x: unknown, now: number): Profile | string {
     history,
     settings,
     createdAt: isNum(x.createdAt) ? x.createdAt : now,
+    ...withTime(normTimeSpent(x.timeSpent)),
   }
+}
+
+function withTime(t: TimeSpent | undefined): { timeSpent?: TimeSpent } {
+  return t ? { timeSpent: t } : {}
 }
 
 function normReward(x: unknown): RewardDef | null {

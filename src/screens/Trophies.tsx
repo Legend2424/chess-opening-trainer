@@ -6,6 +6,7 @@ import type { AchievementDef, CoinEvent, Profile } from '../types.ts'
 import { useNav } from '../app/nav.tsx'
 import { useActiveProfile } from '../store/appStore.ts'
 import { currentStreak } from '../store/profileOps.ts'
+import { formatDurationShort, timeSummary } from '../store/timeSpent.ts'
 import { ACHIEVEMENTS } from '../store/achievements.ts'
 import { itemsOfKind } from '../store/catalog.ts'
 import { levelForXp, levelProgress } from '../store/levels.ts'
@@ -89,13 +90,18 @@ function HeroCard({ profile, unlocked }: { profile: Profile; unlocked: number })
 
 function StatsGrid({ profile, now }: { profile: Profile; now: number }) {
   const t = profile.totals
-  const stats: Array<{ icon: string; label: string; value: number; tone: string }> = [
+  const time = timeSummary(profile, now)
+  const stats: Array<{ icon: string; label: string; value: number; text?: string; tone: string }> = [
     { icon: '📚', label: 'Lines finished', value: t.lines, tone: '#6c4bf4' },
     { icon: '⭐', label: 'Perfect lines', value: t.perfects, tone: '#f59e0b' },
     { icon: '🔥', label: 'Best combo', value: profile.bestCombo, tone: '#f97316' },
     { icon: '📅', label: 'Day streak', value: currentStreak(profile, now), tone: '#ef4444' },
     { icon: '🤖', label: 'Computer wins', value: t.engineWins, tone: '#3b82f6' },
     { icon: '⚔️', label: 'Blunders punished', value: t.blundersPunished, tone: '#22c55e' },
+    // Active time only (taps/moves; idle gaps are capped) — see src/app/activityTracker.ts.
+    { icon: '⏱️', label: 'Time today', value: 0, text: formatDurationShort(time.todayMs), tone: '#0ea5e9' },
+    { icon: '🗓️', label: 'This week', value: 0, text: formatDurationShort(time.weekMs), tone: '#8b5cf6' },
+    { icon: '⌛', label: 'Total time', value: 0, text: formatDurationShort(time.totalMs), tone: '#14b8a6' },
   ]
   return (
     <div className="tr-stats">
@@ -104,7 +110,11 @@ function StatsGrid({ profile, now }: { profile: Profile; now: number }) {
           <span className="tr-stat__icon" aria-hidden>
             {s.icon}
           </span>
-          <CountUp className="tr-stat__value" value={s.value} from={0} duration={900} delay={150 + i * 60} />
+          {s.text !== undefined ? (
+            <span className="tr-stat__value tr-stat__value--text">{s.text}</span>
+          ) : (
+            <CountUp className="tr-stat__value" value={s.value} from={0} duration={900} delay={150 + i * 60} />
+          )}
           <span className="tr-stat__label">{s.label}</span>
         </div>
       ))}

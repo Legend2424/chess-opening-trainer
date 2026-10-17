@@ -102,6 +102,11 @@
   line-height: 1;
   color: var(--c-ink);
 }
+.tr-stat__value--text {
+  font-size: 1.35rem;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
 .tr-stat__label {
   font-weight: 800;
   font-size: 0.86rem;
@@ -433,6 +438,9 @@
   }
   .tr-stat__value {
     font-size: 1.5rem;
+  }
+  .tr-stat__value--text {
+    font-size: 1.1rem;
   }
   .tr-hero__band {
     width: 104px;

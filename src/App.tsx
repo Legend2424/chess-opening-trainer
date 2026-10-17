@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, type ReactNode } from 'react'
 import { NavProvider, useNav } from './app/nav.tsx'
 import { ErrorBoundary } from './app/ErrorBoundary.tsx'
+import { setActivityScreen } from './app/activityTracker.ts'
 import type { Screen } from './types.ts'
 import { useActiveProfile } from './store/appStore.ts'
 import { ToastViewport } from './components/ui/index.ts'
@@ -34,6 +35,8 @@ function CurrentScreen() {
   useEffect(() => {
     if (needsProfile && !profile) reset({ name: 'profiles' })
   }, [needsProfile, profile, reset])
+  // Active-time counting pauses on the profile picker and in the Parent zone.
+  useEffect(() => setActivityScreen(screen.name), [screen.name])
   if (needsProfile && !profile) return null
 
   switch (screen.name) {
