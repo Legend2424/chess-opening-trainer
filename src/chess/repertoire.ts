@@ -487,10 +487,23 @@ export function buildRepertoire(def: OpeningDef, games: PgnGame[], opts: BuildOp
       const last = canonOf(moves[moves.length - 1])
       if (seen.has(last) || hasLonger.has(last)) continue
       seen.add(last)
-      // 6: name
+      // 6: name — where the line leaves the chapter main line, plus (if
+      // different) the last place it picks a side variation, so sibling lines
+      // read differently: "4.c4 Qd6", "4.c4 … 9...Nbd7".
       let name = 'Main line'
       const leave = moves.findIndex((n) => !b.info.get(n)!.main)
-      if (leave >= 0) name = movesLabel(moves.slice(leave, leave + 2))
+      if (leave >= 0) {
+        name = movesLabel(moves.slice(leave, leave + 2))
+        let lastBranch = -1
+        for (let k = moves.length - 1; k > leave + 1; k--) {
+          const siblings = k === 0 ? ch.roots : moves[k - 1].children
+          if (siblings.length > 1 && siblings[0] !== moves[k]) {
+            lastBranch = k
+            break
+          }
+        }
+        if (lastBranch > 0) name += ` … ${movesLabel(moves.slice(lastBranch, lastBranch + 1))}`
+      }
       // 7: id
       const hashInput = `${def.id}|${ch.id}|${moves.map((n) => n.uci).join(' ')}`
       let id = stableHash(hashInput)
@@ -520,6 +533,21 @@ export function buildRepertoire(def: OpeningDef, games: PgnGame[], opts: BuildOp
         hasOpponentBlunder,
       })
     }
+  }
+
+  // Any names still shared within a chapter get a counter: "… (2)".
+  const nameCount = new Map<string, number>()
+  for (const line of lines) {
+    const key = `${line.chapterId}|${line.name}`
+    nameCount.set(key, (nameCount.get(key) ?? 0) + 1)
+  }
+  const nameSeen = new Map<string, number>()
+  for (const line of lines) {
+    const key = `${line.chapterId}|${line.name}`
+    if ((nameCount.get(key) ?? 0) < 2) continue
+    const k = (nameSeen.get(key) ?? 0) + 1
+    nameSeen.set(key, k)
+    line.name = `${line.name} (${k})`
   }
 
   const linesByNode = new Map<string, Line[]>()

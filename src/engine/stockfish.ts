@@ -66,17 +66,38 @@ export class Engine {
   /** bestmove replies still due from searches cancelled by stop(); they must not answer newer queries. */
   private staleBestmoves = 0
 
-  /** Load the wasm engine and complete the UCI handshake. */
-  async init(): Promise<void> {
+  /**
+   * Load the wasm engine and complete the UCI handshake. Rejects if the worker
+   * fails to load (e.g. offline / 404) or doesn't answer within `timeoutMs`,
+   * so callers can show an error and retry with a fresh Engine.
+   */
+  async init(timeoutMs = 60_000): Promise<void> {
     if (this.worker) return
-    this.worker = new Worker(ENGINE_URL)
-    this.worker.onmessage = (e: MessageEvent) => this.handleLine(String(e.data))
-    this.send('uci')
-    await this.waitFor('uciok')
-    this.send('setoption name Threads value 1')
-    this.send('setoption name Hash value 64')
-    this.send('setoption name UCI_AnalyseMode value false')
-    await this.isReady()
+    const worker = new Worker(ENGINE_URL)
+    this.worker = worker
+    worker.onmessage = (e: MessageEvent) => this.handleLine(String(e.data))
+    let fail: (err: Error) => void = () => {}
+    const failed = new Promise<never>((_, reject) => {
+      fail = reject
+    })
+    worker.onerror = (e: ErrorEvent) => {
+      e.preventDefault?.()
+      fail(new Error(`Stockfish failed to load${e.message ? `: ${e.message}` : ''}`))
+    }
+    const timer = setTimeout(() => fail(new Error('Stockfish took too long to start')), timeoutMs)
+    const handshake = (async () => {
+      this.send('uci')
+      await this.waitFor('uciok')
+      this.send('setoption name Threads value 1')
+      this.send('setoption name Hash value 64')
+      this.send('setoption name UCI_AnalyseMode value false')
+      await this.isReady()
+    })()
+    try {
+      await Promise.race([handshake, failed])
+    } finally {
+      clearTimeout(timer)
+    }
     this.ready = true
     this.readyWaiters.forEach((r) => r())
     this.readyWaiters = []
@@ -238,8 +259,19 @@ export class Engine {
   }
 
   dispose() {
+    const evalCb = this.onEval
+    const bestCb = this.onBestQuery
+    this.onBestMove = null
+    this.onEval = null
+    this.onBestQuery = null
     this.worker?.terminate()
     this.worker = null
     this.ready = false
+    this.pendingSearches = 0
+    this.staleBestmoves = 0
+    this.lineWaiters = []
+    // Let queued evaluate()/bestMoveAtDepth() callers move on.
+    evalCb?.(null)
+    bestCb?.(null)
   }
 }

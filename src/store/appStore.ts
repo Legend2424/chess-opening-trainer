@@ -422,6 +422,22 @@ export const actions = {
     if (r.ok) parentUnlockedUntil = Date.now() + PARENT_SESSION_MS
     return r
   },
+  /**
+   * "Forgot the PIN?" — replace it without the old one (the UI puts a grown-up
+   * check in front). Recorded as parent.pinResetAt so the parent zone can show it.
+   */
+  resetPin(pin: string): SimpleResult {
+    if (getStorageStatus().loadIssue) {
+      return { ok: false, error: 'invalid', message: "The saved data can't be read right now, so the PIN can't be changed." }
+    }
+    const r = run(ops.resetPin(getAppData(), pin, Date.now()))
+    if (r.ok) {
+      pinFails = 0
+      pinLockedUntil = 0
+      parentUnlockedUntil = Date.now() + PARENT_SESSION_MS
+    }
+    return r
+  },
 
   // --- parent: rewards & training settings ----------------------------
   setReward(reward: RewardDef): SimpleResult {

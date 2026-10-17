@@ -782,14 +782,14 @@ button.topbar__who {
   filter: grayscale(1);
   opacity: 0.3;
 }
-.stars--arc .star:nth-child(2) {
+.stars--arc .star:nth-of-type(2) {
   transform: translateY(-18%) scale(1.18);
 }
 .star--anim {
   animation: oq-star-pop 0.55s var(--ease-pop) both;
   animation-delay: calc(var(--i, 0) * 0.22s + 0.1s);
 }
-.stars--arc .star--anim:nth-child(2) {
+.stars--arc .star--anim:nth-of-type(2) {
   animation-name: oq-star-pop-mid;
 }
 @keyframes oq-star-pop-mid {

@@ -623,6 +623,16 @@ export function setPin(data: AppData, pin: string): OpResult {
   return { data: withParent(data, { pin }), ok: true }
 }
 
+/**
+ * "Forgot the PIN?": replace it without the old one. There is no server, so
+ * this can't be truly secure — instead it is recorded (pinResetAt) and the
+ * parent zone shows when it happened.
+ */
+export function resetPin(data: AppData, pin: string, now: number): OpResult {
+  if (!isValidPin(pin)) return fail(data, 'invalid')
+  return { data: withParent(data, { pin, pinResetAt: now }), ok: true }
+}
+
 function cleanReward(raw: Partial<RewardDef>, id: string): RewardDef | null {
   const name = typeof raw.name === 'string' ? raw.name.replace(/\s+/g, ' ').trim().slice(0, 40) : ''
   const emoji = typeof raw.emoji === 'string' && raw.emoji.trim() ? raw.emoji.trim().slice(0, 8) : '🎁'

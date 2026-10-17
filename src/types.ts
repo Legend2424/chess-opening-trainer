@@ -206,6 +206,8 @@ export interface Profile {
 
 export interface ParentSettings {
   pin: string | null // null until set on first visit
+  /** When the PIN was last replaced through "Forgot the PIN?" (shown in the parent zone). */
+  pinResetAt?: number
   rewards: RewardDef[] // includes the Pokémon pack
   maxPly: Record<string, number> // per opening id; 0 = no limit
   enabledExtras: string[] // extra chapter ids switched on

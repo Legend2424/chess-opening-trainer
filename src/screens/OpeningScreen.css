@@ -1,0 +1,489 @@
+/* Opening screen (DESIGN.md §6.3). On iPad everything fits on one screen; the
+   chapter list scrolls inside its card. Phones fall back to a scrolling page. */
+
+.opening {
+  height: var(--app-h);
+  overflow: hidden;
+}
+
+.opening__page {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px calc(16px + var(--safe-right)) calc(16px + var(--safe-bottom)) calc(16px + var(--safe-left));
+}
+
+/* ------------------------------------------------------------------ hero */
+.opening__hero {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 16px 22px;
+  border-radius: var(--radius-xl);
+  color: #fff;
+  background: var(--opening-accent, var(--c-primary));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--opening-accent, var(--c-primary)) 70%, #ffffff) 0%,
+    var(--opening-accent, var(--c-primary)) 55%,
+    color-mix(in srgb, var(--opening-accent, var(--c-primary)) 75%, #1e1250) 100%
+  );
+  box-shadow:
+    0 6px 0 color-mix(in srgb, var(--opening-accent, var(--c-primary)) 60%, #1e1250),
+    var(--shadow-card);
+  animation: oq-slide-up 0.4s var(--ease-out) backwards;
+}
+
+.opening__emoji {
+  flex: 0 0 auto;
+  width: 84px;
+  height: 84px;
+  display: grid;
+  place-items: center;
+  font-size: 54px;
+  line-height: 1;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.25);
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.45);
+  filter: drop-shadow(0 4px 4px rgba(30, 18, 80, 0.25));
+}
+
+.opening__hero-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.opening__name {
+  font-size: 2.2rem;
+  line-height: 1.05;
+  text-shadow: 0 2px 0 rgba(30, 18, 80, 0.25);
+}
+
+.opening__hero-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.opening__side {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 3px 14px 3px 6px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1rem;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--c-ink);
+}
+.opening__side-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 2px #2a2440;
+}
+.opening__side.is-white .opening__side-dot {
+  background: #fff;
+}
+.opening__side.is-black .opening__side-dot {
+  background: #2a2440;
+}
+
+.opening__tagline {
+  font-weight: 700;
+  opacity: 0.95;
+  text-shadow: 0 1px 0 rgba(30, 18, 80, 0.25);
+}
+
+.opening__mastery {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.opening__ring-pct {
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: 1.35rem;
+  color: #fff;
+  text-shadow: 0 2px 0 rgba(30, 18, 80, 0.3);
+}
+.opening__counts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  white-space: nowrap;
+}
+.opening__counts b {
+  font-size: 1.15rem;
+}
+
+/* ------------------------------------------------------------------ grid */
+.opening__grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 16px;
+}
+
+.opening__col--main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.opening .opening__coach {
+  --btn-h: 92px;
+  justify-content: flex-start;
+  text-align: left;
+  animation: oq-slide-up 0.4s var(--ease-out) 0.05s backwards;
+}
+.opening__coach .btn__icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+  font-size: 1.1em;
+}
+.opening__coach-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.opening__coach-text small {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 0.95rem;
+  opacity: 0.92;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.opening__card-title {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.25rem;
+  line-height: 1.2;
+}
+
+.opening .opening__order {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 10px;
+  animation: oq-slide-up 0.4s var(--ease-out) 0.1s backwards;
+}
+.opening__order-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.opening__order-icon {
+  font-size: 34px;
+  line-height: 1;
+}
+.opening__order-text {
+  min-width: 0;
+}
+.opening__order-sub {
+  font-weight: 700;
+  color: var(--c-ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.opening__order-sub b {
+  color: var(--c-ink);
+}
+.opening__order-next {
+  color: var(--c-muted);
+}
+.opening__order-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.opening__grow {
+  flex: 1 1 auto;
+}
+
+.opening .opening__learn {
+  padding: 10px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--c-card);
+  box-shadow: var(--shadow-card);
+  animation: oq-slide-up 0.4s var(--ease-out) 0.15s backwards;
+}
+
+/* -------------------------------------------------------------- chapters */
+.opening__chapters {
+  display: flex;
+  flex-direction: column;
+  align-self: start;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  animation: oq-slide-up 0.4s var(--ease-out) 0.12s backwards;
+}
+
+.opening__chapters-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 18px 10px;
+  border-bottom: 2px solid var(--c-line);
+}
+.opening__chapters-count {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.opening__chapter-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 6px 8px 8px;
+  list-style: none;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.chapter-row {
+  width: 100%;
+  min-height: 68px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    transform 0.08s;
+}
+.chapter-row:active:not(:disabled) {
+  transform: scale(0.98);
+  background: var(--c-primary-100);
+}
+@media (hover: hover) {
+  .chapter-row:hover:not(:disabled) {
+    background: var(--c-primary-50);
+  }
+}
+.opening__chapter-list li + li .chapter-row {
+  box-shadow: 0 -1px 0 var(--c-line);
+}
+.chapter-row.is-empty {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.chapter-row__main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chapter-row__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.12rem;
+  line-height: 1.2;
+  color: var(--c-ink);
+}
+.opening .chapter-row__chip {
+  min-height: 22px;
+  padding: 1px 8px;
+  font-size: 0.75rem;
+}
+.chapter-row__meta {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--c-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chapter-row__new {
+  color: var(--c-gold-700);
+}
+.chapter-row__due {
+  color: var(--c-info-700);
+}
+.chapter-row__bar {
+  max-width: 320px;
+}
+.chapter-row__pct {
+  flex: 0 0 auto;
+  min-width: 46px;
+  text-align: right;
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--c-success-700);
+}
+.chapter-row__go {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--c-primary-100);
+  color: var(--c-primary-600);
+  font-size: 1.6rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.opening__extras {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* iPad portrait: the switch and the computer button share a row. */
+@media (orientation: portrait) and (min-width: 641px) {
+  .opening__extras {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: center;
+  }
+  .opening__extras .opening__long {
+    display: none;
+  }
+  .opening__extras .opening__short {
+    display: inline;
+  }
+}
+
+.opening__short {
+  display: none;
+}
+@media (max-width: 420px) {
+  .opening__long {
+    display: none;
+  }
+  .opening__short {
+    display: inline;
+  }
+}
+
+/* -------------------------------------------------------------- messages */
+.opening-msg {
+  margin: 24px auto;
+  width: min(560px, 100%);
+  padding: 28px 24px;
+  border-radius: var(--radius-xl);
+  background: var(--c-card);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+}
+.opening-msg h2 {
+  font-size: var(--fs-xl);
+}
+.opening-msg__emoji {
+  font-size: 64px;
+  line-height: 1;
+}
+.opening-msg__spinner {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 5px solid var(--c-primary-100);
+  border-top-color: var(--c-primary);
+}
+
+/* ------------------------------------------------------------ portrait */
+@media (orientation: portrait) {
+  .opening__grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+}
+
+/* Phones / short windows: a normal scrolling page. */
+@media (max-width: 640px), (max-height: 680px) {
+  .opening {
+    height: auto;
+    min-height: var(--app-h);
+    overflow: visible;
+  }
+  .opening__grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+  }
+  .opening__chapters,
+  .opening__chapter-list {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 640px) {
+  .opening__page {
+    gap: 12px;
+    padding-top: 12px;
+  }
+  .opening__hero {
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 14px 16px;
+  }
+  .opening__emoji {
+    width: 64px;
+    height: 64px;
+    font-size: 40px;
+  }
+  .opening__name {
+    font-size: 1.6rem;
+  }
+  .opening__hero-text {
+    flex: 1 1 0;
+    min-width: 170px;
+  }
+  .opening__name {
+    font-size: 1.6rem;
+  }
+  .opening__mastery {
+    width: 100%;
+  }
+  .opening__counts {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 2px 12px;
+  }
+  .opening .opening__coach {
+    --btn-h: 80px;
+    --btn-fs: 1.45rem;
+  }
+}

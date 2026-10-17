@@ -60,6 +60,41 @@ export function stopEngine(): void {
   engine?.stop()
 }
 
+/**
+ * Throw the engine away (e.g. it stopped answering). The next getEngine()
+ * loads a fresh worker; the browser cache makes that quick.
+ */
+export function resetEngine(): void {
+  const old = engine
+  engine = null
+  loading = null
+  mode = 'analysis'
+  old?.dispose()
+  setStatus('idle')
+}
+
+const ANALYSIS_TIMEOUT_MS = 20_000
+
+/** Resolve with null (and reset the engine) if an analysis query hangs. */
+function withTimeout<T>(p: Promise<T | null>, ms = ANALYSIS_TIMEOUT_MS): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      resetEngine()
+      resolve(null)
+    }, ms)
+    p.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(null)
+      },
+    )
+  })
+}
+
 function toCp(s: Score | null): number | null {
   if (!s) return null
   if (s.mate !== undefined) return s.mate > 0 ? 10000 - s.mate * 10 : -10000 - s.mate * 10
@@ -78,7 +113,7 @@ async function analysisEngine(): Promise<Engine> {
 /** Score (centipawns, from White's point of view) of a position, or null. */
 export async function evaluateWhite(fen: string, depth = 12): Promise<number | null> {
   const e = await analysisEngine()
-  const cp = toCp(await e.evaluate(fen, depth))
+  const cp = toCp(await withTimeout(e.evaluate(fen, depth)))
   if (cp === null) return null
   return fen.split(' ')[1] === 'w' ? cp : -cp
 }
@@ -86,7 +121,7 @@ export async function evaluateWhite(fen: string, depth = 12): Promise<number | n
 /** Best move (uci) at full strength, or null. */
 export async function bestMove(fen: string, depth = 14): Promise<string | null> {
   const e = await analysisEngine()
-  return e.bestMoveAtDepth(fen, depth)
+  return withTimeout(e.bestMoveAtDepth(fen, depth))
 }
 
 export type MistakeVerdict = {
@@ -121,8 +156,10 @@ export async function judgeMistake(
   if (!afterWrong || !afterBook) return null
   try {
     const wrong = await evaluateWhite(afterWrong, depth)
+    // Cancelled (stopEngine) or failed: don't start a second search.
+    if (wrong === null) return null
     const book = await evaluateWhite(afterBook, depth)
-    if (wrong === null || book === null) return null
+    if (book === null) return null
     const mover = fenBefore.split(' ')[1] === 'w' ? 1 : -1
     const lossCp = Math.max(0, (book - wrong) * mover)
     const kind = lossCp >= 200 ? 'blunder' : lossCp >= 70 ? 'worse' : 'fine'

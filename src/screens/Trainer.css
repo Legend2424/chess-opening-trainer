@@ -1,0 +1,752 @@
+/* Trainer screen (DESIGN.md §6.4). Uses the tokens from global.css and the
+   .layout-train helper (board left / panel right in landscape, stacked in portrait). */
+
+.trainer {
+  height: var(--app-h);
+  overflow: hidden;
+}
+
+.trainer__topbar-title {
+  font-family: var(--font-head);
+}
+
+/* ------------------------------------------------------------------ layout */
+/* Portrait: give the panel a bit more room under the board (the board stays
+   ~88% of an iPad's width). Needs the extra class: global.css loads later. */
+.trainer .trainer__layout {
+  --panel-min-h: 360px;
+}
+
+.trainer__board {
+  position: relative;
+}
+
+/* Tap anywhere on the board to take a wrong move back. */
+.trainer__board-tap {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.trainer__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+@media (orientation: landscape) {
+  .trainer__panel {
+    height: var(--board-size);
+    max-height: var(--train-avail-h);
+    gap: 14px;
+  }
+}
+
+/* ------------------------------------------------------------- header card */
+.trainer__head {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--c-card);
+  box-shadow: var(--shadow-card);
+  border-top: 5px solid var(--opening-accent, var(--c-primary));
+}
+
+.trainer__head-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.trainer__mode {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--c-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trainer__combo,
+.trainer__session {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 10px;
+  min-height: 28px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1rem;
+  white-space: nowrap;
+}
+
+.trainer__combo {
+  background: linear-gradient(180deg, #fff1e6 0%, #ffd9bf 100%);
+  color: #9a3b00;
+  box-shadow: inset 0 0 0 2px #ffb27a;
+  animation: oqt-pop 0.4s var(--ease-pop) backwards;
+}
+.trainer__combo.is-off {
+  filter: grayscale(1);
+  opacity: 0.6;
+}
+.trainer__combo.is-hot {
+  background: linear-gradient(180deg, #ffe0b8 0%, #ffab5c 100%);
+  color: #7c2d00;
+  box-shadow:
+    inset 0 0 0 2px #f97316,
+    0 0 12px rgba(249, 115, 22, 0.55);
+}
+
+.trainer__session {
+  background: var(--c-gold-100);
+  color: var(--c-gold-ink);
+  box-shadow: inset 0 0 0 2px #ffd45c;
+}
+
+.trainer__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.2rem;
+  line-height: 1.2;
+}
+
+.trainer__chapter {
+  color: var(--c-ink);
+}
+
+.trainer__sep {
+  color: var(--c-muted);
+}
+
+.trainer__line-name {
+  color: var(--c-primary-600);
+  font-variant-numeric: tabular-nums;
+}
+
+.trainer .trainer__badge {
+  min-height: 26px;
+  padding: 2px 10px;
+  font-size: 0.82rem;
+}
+
+.trainer__progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.trainer__count {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--c-ink-2);
+}
+
+/* ------------------------------------------------------------ progress dots */
+.pdots {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pdot {
+  --pdot: 24px;
+  width: var(--pdot);
+  height: var(--pdot);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: calc(var(--pdot) * 0.58);
+  line-height: 1;
+  color: #fff;
+  background: var(--c-card-2);
+  box-shadow: inset 0 0 0 2px #d8d3ee;
+}
+.pdots--small {
+  gap: 4px;
+}
+.pdots--small .pdot {
+  --pdot: 18px;
+}
+.pdot--clean {
+  background: var(--c-success);
+  box-shadow: 0 2px 0 var(--c-success-700);
+  animation: oqt-pop 0.4s var(--ease-pop) backwards;
+}
+.pdot--fixed {
+  background: #f59e0b;
+  box-shadow: 0 2px 0 #b45309;
+  animation: oqt-pop 0.4s var(--ease-pop) backwards;
+}
+.pdot--current {
+  background: var(--c-primary-100);
+  box-shadow: inset 0 0 0 3px var(--c-primary);
+  animation: oqt-dot-pulse 1.2s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------- Hoot bubble */
+.trainer__talk {
+  flex: 1 1 auto;
+  min-height: 64px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 4px 4px 4px 2px;
+}
+
+.trainer__talk .bubble {
+  font-size: 1.08rem;
+}
+
+.coach__headline {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.12em;
+  line-height: 1.25;
+}
+.bubble--error .coach__headline {
+  color: var(--c-error-700);
+}
+.bubble--success .coach__headline {
+  color: var(--c-success-700);
+}
+.bubble--info .coach__headline {
+  color: var(--c-info-700);
+}
+.bubble--gold .coach__headline {
+  color: var(--c-gold-ink);
+}
+
+.coach__headline + .coach__body,
+.coach__headline + .coach__notes,
+.coach__notes + .coach__body {
+  margin-top: 6px;
+}
+
+.coach__body {
+  font-weight: 700;
+}
+
+.coach__notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.coach__move {
+  font-family: var(--font-head);
+  font-weight: 600;
+  color: var(--c-primary-600);
+  white-space: nowrap;
+}
+
+.coach__insight {
+  color: var(--c-ink);
+  font-weight: 800;
+  animation: oq-fade-in 0.4s var(--ease-out) backwards;
+}
+
+.coach__checking {
+  color: var(--c-muted);
+  font-weight: 700;
+}
+
+.coach__tip {
+  color: var(--c-ink-2);
+  font-weight: 700;
+}
+
+/* ----------------------------------------------------------------- controls */
+.trainer__controls {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.trainer__controls .btn {
+  flex: 0 0 auto;
+}
+
+.trainer__controls .trainer__grow,
+.trainer__controls .trainer__takeback {
+  flex: 1 1 auto;
+}
+
+.trainer .trainer__takeback {
+  --btn-fs: 1.5rem;
+}
+
+/* "Take it back" is alone in its row and pulses up to scale(1.06): leave room
+   for that, or the panel (a scroll box) shows a flickering scrollbar. */
+.trainer__controls--wrong {
+  padding: 3px 3.5%;
+}
+
+/* Hint / Restart / Learn: three equal tiles, icon above the label. */
+.trainer__controls--tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.trainer__controls--tiles .btn {
+  --btn-h: 66px;
+  --btn-px: 6px;
+  --btn-fs: 1.02rem;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+.trainer__controls--tiles .btn__icon {
+  font-size: 1.45em;
+}
+.trainer__controls--tiles .btn__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  overflow: visible;
+}
+
+/* Restart asks "Sure?" once a few moves are in. */
+.trainer__controls--tiles .trainer__restart.is-armed {
+  animation: oq-wiggle 0.45s ease-in-out;
+}
+
+/* ---------------------------------------------------------------- move list */
+.mlist {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 2px 8px;
+  max-height: 128px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.6);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+.mlist__item {
+  display: inline-flex;
+  gap: 3px;
+  white-space: nowrap;
+}
+.mlist__num {
+  color: var(--c-muted);
+  font-weight: 700;
+}
+.mlist__san {
+  font-family: var(--font-head);
+  font-weight: 500;
+  color: var(--c-ink-2);
+  padding: 0 3px;
+  border-radius: 6px;
+}
+.mlist__san.is-user {
+  font-weight: 600;
+  color: var(--c-ink);
+}
+.mlist__san.is-last {
+  background: var(--c-primary-100);
+  color: var(--c-primary-700);
+}
+.mlist__san.is-wrong {
+  background: var(--c-error-100);
+  color: var(--c-error-700);
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+}
+.mlist__empty {
+  color: var(--c-muted);
+  font-weight: 700;
+}
+
+/* Portrait: one line that keeps the newest moves in view. */
+@media (orientation: portrait) {
+  .mlist {
+    flex-wrap: nowrap;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 4px 10px;
+    scrollbar-width: none;
+  }
+  .mlist::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.trainer__pips {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 2px;
+}
+.trainer__pip {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(107, 71, 0, 0.18);
+  box-shadow: inset 0 0 0 2px rgba(107, 71, 0, 0.45);
+}
+.trainer__pip.is-on {
+  background: var(--c-gold-ink);
+}
+
+.trainer__learn-state {
+  font-size: 0.72em;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  background: rgba(36, 31, 77, 0.1);
+}
+.trainer__learn.is-on .trainer__learn-state {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+/* ------------------------------------------------------------ messages */
+.trainer-msg {
+  margin: 40px auto;
+  width: min(560px, calc(100% - 32px));
+  padding: 28px 24px;
+  border-radius: var(--radius-xl);
+  background: var(--c-card);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+}
+.trainer-msg h2 {
+  font-size: var(--fs-xl);
+}
+.trainer-msg__emoji {
+  font-size: 64px;
+  line-height: 1;
+}
+.trainer-msg__spinner {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 5px solid var(--c-primary-100);
+  border-top-color: var(--c-primary);
+}
+
+/* ------------------------------------------------------- smaller screens */
+@media (orientation: portrait) {
+  .trainer__talk .bubble {
+    font-size: 1rem;
+  }
+  .trainer__talk {
+    padding-top: 2px;
+    padding-bottom: 2px;
+  }
+  /* Short on room under the board: the big pulsing button already says "Take it back". */
+  .trainer--wrongMove .coach__tip {
+    display: none;
+  }
+}
+
+@media (max-width: 600px) {
+  .trainer__title {
+    font-size: 1.05rem;
+  }
+  .trainer__head {
+    padding: 8px 12px 10px;
+  }
+  .trainer__controls {
+    gap: 8px;
+  }
+  .trainer__controls .btn {
+    --btn-px: 14px;
+  }
+  .trainer .trainer__takeback {
+    --btn-fs: 1.25rem;
+  }
+  .trainer__talk .bubble-row .bubble__speaker {
+    --speaker-size: 36px !important;
+  }
+  .trainer__talk .bubble {
+    font-size: 0.95rem;
+    padding: 8px 12px;
+  }
+  /* The big pulsing button says it already. */
+  .trainer .coach__tip {
+    display: none;
+  }
+}
+
+/* Phones in portrait: Hoot gets the room, the move list goes. */
+@media (max-width: 600px) and (orientation: portrait) {
+  .trainer .trainer__moves {
+    display: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .trainer__btn-text {
+    display: none;
+  }
+  .trainer__session {
+    display: none;
+  }
+}
+
+/* Short landscape (phones): compact header. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .trainer__head {
+    padding: 6px 10px 8px;
+    gap: 4px;
+  }
+  .trainer__title {
+    font-size: 1rem;
+  }
+  .trainer__panel {
+    gap: 8px;
+  }
+}
+
+/* ---------------------------------------------------- completion modal */
+.lcm .modal__header {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  padding: 12px;
+}
+.lcm .modal__body {
+  padding-top: 18px;
+}
+
+.lcm__body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.lcm__body .stars {
+  margin-top: 10px;
+}
+
+.lcm__title {
+  font-size: 2rem;
+}
+
+.lcm__line {
+  color: var(--c-muted);
+  font-weight: 800;
+  font-size: 0.95rem;
+}
+
+.lcm__coins {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 26px 4px 16px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(180deg, #fff9e0 0%, #ffefb0 100%);
+  box-shadow:
+    inset 0 0 0 3px #ffd45c,
+    0 4px 0 #f0c040;
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: 2.4rem;
+  line-height: 1.2;
+  color: var(--c-gold-ink);
+}
+.lcm__coin {
+  font-size: 0.9em;
+}
+
+.lcm__chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.lcm__chip-coins {
+  font-family: var(--font-head);
+  font-weight: 700;
+  color: var(--c-gold-700);
+}
+
+.lcm__banners {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lcm__banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  font-weight: 700;
+}
+.lcm__banner b {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.1em;
+}
+.lcm__banner-emoji {
+  font-size: 32px;
+  line-height: 1;
+}
+.lcm__banner--level {
+  background: linear-gradient(90deg, #ede9fe 0%, #f6f3ff 100%);
+  border: 2px solid #c4b5fd;
+}
+.lcm__banner--goal {
+  background: var(--c-success-100);
+  border: 2px solid #86efac;
+}
+.lcm__banner--wrap {
+  background: var(--c-gold-100);
+  border: 2px solid #ffd45c;
+}
+
+.lcm__achievements {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lcm__section-title {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.15rem;
+}
+.lcm__ach {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, #fbf9ff 0%, #efe9ff 100%);
+  border: 2px solid #ddd6fe;
+  text-align: left;
+}
+.lcm__ach-emoji {
+  font-size: 34px;
+  line-height: 1;
+}
+.lcm__ach-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--c-ink-2);
+}
+.lcm__ach-text b {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: var(--c-ink);
+}
+
+.lcm__note {
+  font-weight: 700;
+  color: var(--c-ink-2);
+}
+
+.lcm__actions {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lcm__secondary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.lcm__secondary .btn {
+  flex: 1 1 0;
+}
+
+@media (max-width: 480px) {
+  .lcm .lcm__secondary .btn {
+    --btn-h: 62px;
+    --btn-px: 4px;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+}
+
+@media (max-height: 720px) {
+  .lcm__title {
+    font-size: 1.6rem;
+  }
+  .lcm__coins {
+    font-size: 2rem;
+  }
+}
+
+/* ---------------------------------------------------------------- keyframes */
+@keyframes oqt-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes oqt-dot-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow:
+      inset 0 0 0 3px var(--c-primary),
+      0 0 0 0 rgba(108, 75, 244, 0.45);
+  }
+  50% {
+    transform: scale(1.12);
+    box-shadow:
+      inset 0 0 0 3px var(--c-primary),
+      0 0 0 6px rgba(108, 75, 244, 0);
+  }
+}

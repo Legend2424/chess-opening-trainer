@@ -1,0 +1,456 @@
+/* Screen 6 — Trophies */
+
+.trophies__page {
+  gap: 18px;
+}
+
+.trophies__top {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+/* ----------------------------------------------------------------- hero */
+.card.tr-hero {
+  --accent: var(--c-primary);
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  border-radius: 26px;
+}
+.tr-hero__band {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 128px;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.35) 0 6px, transparent 7px),
+    radial-gradient(circle at 75% 85%, rgba(255, 255, 255, 0.3) 0 8px, transparent 9px),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0) 60%),
+    var(--accent);
+}
+.tr-hero__body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px 18px;
+}
+.tr-hero__name {
+  font-size: 1.8rem;
+  font-weight: 700;
+  line-height: 1.05;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tr-hero__level {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: var(--c-ink-2);
+}
+.tr-hero__ach {
+  font-weight: 800;
+  color: var(--c-primary-700);
+}
+
+/* ---------------------------------------------------------------- stats */
+.tr-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.tr-stat {
+  --tone: var(--c-primary);
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 12px;
+  padding: 12px 14px;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+.tr-stat::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 6px;
+  background: var(--tone);
+}
+.tr-stat__icon {
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 16px;
+  background: var(--c-card-2);
+  font-size: 1.7rem;
+  line-height: 1;
+}
+.tr-stat__value {
+  font-size: 1.9rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--c-ink);
+}
+.tr-stat__label {
+  font-weight: 800;
+  font-size: 0.86rem;
+  color: var(--c-muted);
+  line-height: 1.2;
+}
+
+/* ---------------------------------------------------------------- shelf */
+.tr-shelf {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px 18px;
+  border-radius: 26px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(0, 0, 0, 0.08)),
+    repeating-linear-gradient(90deg, #8a5a33 0 3px, #93623a 3px 9px, #8d5d35 9px 14px),
+    #8d5d35;
+  box-shadow:
+    inset 0 0 0 4px rgba(255, 255, 255, 0.08),
+    inset 0 -10px 24px rgba(0, 0, 0, 0.25),
+    var(--shadow-card);
+  color: #fff7ea;
+}
+.tr-shelf__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.tr-shelf__head .meta-section-title {
+  color: #fff7ea;
+  text-shadow: 0 2px 0 rgba(60, 30, 5, 0.45);
+}
+.tr-shelf__count {
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.22);
+  font-weight: 800;
+  font-size: 0.9rem;
+}
+.btn.tr-shelf__shop {
+  margin-left: auto;
+}
+.tr-shelf__board {
+  position: relative;
+  padding: 6px 10px 0;
+  border-radius: 18px;
+  background: linear-gradient(180deg, #5d3a1d 0%, #6f4524 70%, #4a2d14 100%);
+  box-shadow: inset 0 8px 18px rgba(0, 0, 0, 0.45);
+}
+.tr-shelf__row {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-around;
+  align-items: flex-end;
+  gap: 8px;
+  min-height: 120px;
+  padding: 10px 4px 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tr-shelf__item {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 96px;
+  padding-bottom: 6px;
+}
+.tr-shelf__emoji {
+  font-size: 3.6rem;
+  line-height: 1;
+  filter: drop-shadow(0 6px 4px rgba(0, 0, 0, 0.45));
+}
+.tr-shelf__item.is-owned .tr-shelf__emoji {
+  animation: oq-float 3.6s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * -0.5s);
+}
+.tr-shelf__item.is-missing .tr-shelf__emoji {
+  filter: brightness(0) opacity(0.35);
+}
+.tr-shelf__label {
+  max-width: 100%;
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #f6d27a, #d9a93c);
+  color: #4a2d00;
+  font-weight: 800;
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 2px 0 #9b6f12;
+}
+.tr-shelf__item.is-missing .tr-shelf__label {
+  background: rgba(0, 0, 0, 0.25);
+  color: rgba(255, 255, 255, 0.55);
+  box-shadow: none;
+}
+.tr-shelf__plank {
+  height: 22px;
+  margin: 0 -10px;
+  border-radius: 6px 6px 12px 12px;
+  background: linear-gradient(180deg, #c48a52 0%, #a8703d 45%, #7d4f27 100%);
+  box-shadow:
+    0 6px 0 #5b3519,
+    0 12px 16px rgba(0, 0, 0, 0.35);
+}
+.tr-shelf__hint {
+  font-weight: 700;
+  color: #ffe9c7;
+}
+
+/* --------------------------------------------------------- achievements */
+.trophies__section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ach-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 12px;
+}
+.ach {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 92px;
+  padding: 12px 14px;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: var(--shadow-soft);
+}
+.ach--got {
+  background: linear-gradient(135deg, #fffaf0 0%, #ffffff 55%, #f4f0ff 100%);
+  box-shadow:
+    0 0 0 3px #ffd45c,
+    var(--shadow-card);
+}
+.ach--locked {
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.7);
+}
+.ach__badge {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  font-size: 2rem;
+  line-height: 1;
+  background: radial-gradient(circle at 35% 30%, #fff6c9 0%, #ffd24a 45%, #f2a900 100%);
+  box-shadow:
+    inset 0 0 0 3px rgba(255, 255, 255, 0.6),
+    0 4px 0 #c98600;
+}
+.ach--locked .ach__badge {
+  background: #e4e1f0;
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.6);
+  filter: grayscale(1);
+  opacity: 0.65;
+}
+.ach__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ach__name {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.08rem;
+  line-height: 1.15;
+}
+.ach__desc {
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--c-ink-2);
+  line-height: 1.25;
+}
+.ach--locked .ach__name,
+.ach--locked .ach__desc {
+  color: #6f6b8f;
+}
+.ach__date {
+  margin-top: 2px;
+  font-weight: 800;
+  font-size: 0.8rem;
+  color: var(--c-success-700);
+}
+.ach__coins {
+  margin-top: 2px;
+  font-weight: 800;
+  font-size: 0.8rem;
+  color: var(--c-gold-ink);
+  opacity: 0.75;
+}
+.ach__lock {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  font-size: 0.95rem;
+  opacity: 0.6;
+}
+
+/* --------------------------------------------------- mastery + history */
+.trophies__bottom {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+.tr-card-title {
+  font-size: 1.25rem;
+  padding: 4px 6px 10px;
+}
+.tr-mastery__list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 0 6px 6px;
+}
+.tr-mastery__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.tr-mastery__emoji {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  font-size: 1.8rem;
+  line-height: 1;
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.35);
+}
+.tr-mastery__body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tr-mastery__meta {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--c-muted);
+}
+
+.tr-history__list {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px 4px;
+  max-height: 340px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.tr-history__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--c-line);
+}
+.tr-history__row:last-child {
+  border-bottom: 0;
+}
+/* Long reasons wrap onto a second line before they are cut. */
+.tr-history__reason {
+  font-weight: 700;
+  font-size: 0.92rem;
+  line-height: 1.25;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+.tr-history__when {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--c-muted);
+  white-space: nowrap;
+}
+.tr-history__delta {
+  min-width: 56px;
+  text-align: right;
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--c-success-700);
+}
+.tr-history__delta.is-neg {
+  color: var(--c-error-700);
+}
+
+/* ------------------------------------------------------------- portrait */
+/* iPad portrait and narrower: one column, so coin reasons get the full width. */
+@media (max-width: 900px) {
+  .trophies__top,
+  .trophies__bottom {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 560px) {
+  .tr-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .tr-stat {
+    padding: 10px;
+    column-gap: 8px;
+  }
+  .tr-stat__icon {
+    width: 40px;
+    height: 40px;
+    font-size: 1.4rem;
+  }
+  .tr-stat__value {
+    font-size: 1.5rem;
+  }
+  .tr-hero__band {
+    width: 104px;
+  }
+  .tr-shelf {
+    padding: 12px;
+  }
+  .tr-shelf__row {
+    justify-content: flex-start;
+    min-height: 100px;
+  }
+  .tr-shelf__item {
+    width: 76px;
+  }
+  .tr-shelf__emoji {
+    font-size: 2.8rem;
+  }
+  .ach-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -1,0 +1,344 @@
+/* Screen 1 — Who's playing? */
+
+.ps__inner {
+  min-height: 100%;
+  width: 100%;
+  max-width: 980px;
+  margin: 0 auto;
+  padding: calc(24px + var(--safe-top)) calc(20px + var(--safe-right)) calc(20px + var(--safe-bottom)) calc(20px + var(--safe-left));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+}
+
+.ps__header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+
+.ps__title {
+  font-size: clamp(2.2rem, 5.4vw, 3.4rem);
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 0.01em;
+}
+
+.ps__hoot {
+  max-width: 560px;
+  width: 100%;
+}
+
+.ps__banner {
+  width: 100%;
+  max-width: 760px;
+}
+
+/* ------------------------------------------------------------------ cards */
+.ps__cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 360px));
+  justify-content: center;
+  gap: clamp(18px, 3vw, 36px);
+  width: 100%;
+}
+.ps__cards--many {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 320px));
+}
+
+.ps-card {
+  --pc-accent: var(--c-primary);
+  --edge: rgba(40, 20, 110, 0.22);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+  padding: 0;
+  margin: 0 0 8px;
+  border: 0;
+  border-radius: 32px;
+  background: #fff;
+  color: var(--c-ink);
+  text-align: center;
+  cursor: pointer;
+  overflow: hidden;
+  box-shadow:
+    0 8px 0 var(--edge),
+    0 22px 40px rgba(40, 20, 110, 0.28);
+  transition:
+    transform 0.12s var(--ease-out),
+    box-shadow 0.12s var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+}
+.ps-card:active {
+  transform: translateY(7px);
+  box-shadow:
+    0 1px 0 var(--edge),
+    0 8px 18px rgba(40, 20, 110, 0.22);
+}
+@media (hover: hover) {
+  .ps-card:hover {
+    transform: translateY(-3px) rotate(-0.4deg);
+  }
+  .ps-card:active {
+    transform: translateY(7px);
+  }
+}
+.ps-card:focus-visible {
+  outline: 4px solid #fff;
+  outline-offset: 4px;
+}
+
+.ps-card__glow {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 4px rgba(255, 255, 255, 0.5);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.ps-card__top {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 26px 16px 20px;
+  background:
+    radial-gradient(circle at 18% 22%, rgba(255, 255, 255, 0.38) 0 7px, transparent 8px),
+    radial-gradient(circle at 84% 30%, rgba(255, 255, 255, 0.3) 0 5px, transparent 6px),
+    radial-gradient(circle at 72% 82%, rgba(255, 255, 255, 0.28) 0 9px, transparent 10px),
+    radial-gradient(circle at 12% 78%, rgba(255, 255, 255, 0.22) 0 4px, transparent 5px),
+    linear-gradient(165deg, rgba(255, 255, 255, 0.32) 0%, rgba(255, 255, 255, 0) 60%),
+    var(--pc-accent);
+}
+.ps-card__top::after {
+  /* soft wave into the white body */
+  content: '';
+  position: absolute;
+  left: -10%;
+  right: -10%;
+  bottom: -26px;
+  height: 52px;
+  border-radius: 50%;
+  background: #fff;
+}
+.ps-card__avatar {
+  position: relative;
+  z-index: 1;
+}
+
+.ps-card__body {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 22px 22px;
+}
+
+.ps-card__name {
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: clamp(1.9rem, 3.4vw, 2.5rem);
+  line-height: 1.05;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ps-card__title {
+  display: inline-block;
+  max-width: 100%;
+  padding: 4px 14px;
+  border-radius: var(--radius-pill);
+  background: var(--c-primary-50);
+  color: var(--c-primary-700);
+  font-weight: 800;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ps-card__level {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  max-width: 220px;
+}
+.ps-card__level-text {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: var(--c-ink-2);
+}
+.ps-card__level-bar {
+  width: 100%;
+}
+
+.ps-card__stats {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-height: 48px;
+}
+
+.ps-card__go {
+  margin-top: 4px;
+  padding: 10px 24px;
+  border-radius: var(--radius-pill);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.25), rgba(255, 255, 255, 0) 60%),
+    var(--pc-accent);
+  color: #fff;
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.2rem;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+  box-shadow: 0 4px 0 rgba(40, 20, 110, 0.22);
+  animation: oq-pulse 1.8s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * 0.4s);
+}
+
+/* ------------------------------------------------------------ parent link */
+.ps__parent {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 20px;
+  border: 2px solid rgba(255, 255, 255, 0.55);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  font-weight: 800;
+  font-size: 1rem;
+  text-shadow: 0 1px 0 rgba(40, 20, 110, 0.3);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  cursor: pointer;
+}
+.ps__parent:active {
+  transform: translateY(2px);
+}
+.ps__parent-badge {
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--c-gold);
+  color: var(--c-gold-ink);
+  font-size: 0.85rem;
+  text-shadow: none;
+}
+
+/* ------------------------------------------- tablet portrait: go bigger */
+@media (orientation: portrait) and (min-width: 700px) {
+  .ps__inner {
+    gap: 34px;
+  }
+  .ps__cards {
+    grid-template-columns: repeat(2, minmax(0, 380px));
+  }
+  .ps-card__top {
+    padding: 34px 16px 26px;
+  }
+  .ps-card__avatar {
+    --size: 150px !important;
+  }
+  .ps-card__body {
+    gap: 12px;
+    padding-bottom: 28px;
+  }
+  .ps-card__name {
+    font-size: 2.7rem;
+  }
+}
+
+/* --------------------------------------------- phones: compact row cards */
+@media (max-width: 640px) {
+  .ps__inner {
+    gap: 18px;
+    padding-top: calc(18px + var(--safe-top));
+  }
+  .ps__cards,
+  .ps__cards--many {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .ps-card {
+    flex-direction: row;
+    text-align: left;
+    border-radius: 26px;
+  }
+  .ps-card__top {
+    flex: 0 0 auto;
+    width: 116px;
+    padding: 14px 10px;
+  }
+  .ps-card__top::after {
+    display: none;
+  }
+  .ps-card__avatar {
+    --size: 84px !important;
+  }
+  .ps-card__body {
+    flex: 1 1 auto;
+    min-width: 0;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 14px 16px 14px 14px;
+  }
+  .ps-card__name {
+    font-size: 1.7rem;
+  }
+  .ps-card__title {
+    font-size: 0.85rem;
+    padding: 2px 10px;
+  }
+  .ps-card__level {
+    align-items: flex-start;
+    max-width: 180px;
+  }
+  .ps-card__level-text {
+    font-size: 1rem;
+  }
+  .ps-card__stats {
+    justify-content: flex-start;
+    min-height: 0;
+  }
+  .ps-card__stats .coin-badge--lg {
+    font-size: 1.2rem;
+  }
+  .ps-card__go {
+    display: none;
+  }
+}
+
+/* Short landscape screens (phones on their side). */
+@media (max-height: 560px) and (orientation: landscape) {
+  .ps__hoot {
+    display: none;
+  }
+  .ps__inner {
+    gap: 14px;
+  }
+  .ps-card__top {
+    padding: 12px;
+  }
+  .ps-card__avatar {
+    --size: 80px !important;
+  }
+  .ps-card__go {
+    display: none;
+  }
+}

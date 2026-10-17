@@ -336,13 +336,15 @@ function normParent(x: unknown): ParentSettings | string {
   const maxPly: Record<string, number> = { ...def.maxPly }
   if (isObj(x.maxPly)) for (const [k, v] of safeEntries(x.maxPly)) if (isNum(v) && v >= 0 && v <= 400) maxPly[k] = Math.floor(v)
   const goal = isNum(x.dailyGoalLines) && x.dailyGoalLines >= 1 && x.dailyGoalLines <= 50 ? Math.floor(x.dailyGoalLines) : def.dailyGoalLines
-  return {
+  const out: ParentSettings = {
     pin,
     rewards,
     maxPly,
     enabledExtras: Array.from(new Set(strArray(x.enabledExtras))),
     dailyGoalLines: goal,
   }
+  if (isNum(x.pinResetAt) && x.pinResetAt > 0) out.pinResetAt = x.pinResetAt
+  return out
 }
 
 /**
