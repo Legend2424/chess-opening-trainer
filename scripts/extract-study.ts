@@ -3,12 +3,12 @@
 // tournament prep, game chapters or other players' names.
 //
 // Usage: node scripts/extract-study.ts [input.pgn] [output.pgn]
-//   default input:  data/studies/opening-lines-CZiXOjIp.raw.pgn  (gitignored)
+//   default input:  data/studies/opening-lines-tournaments-phFA64zi.raw.pgn  (gitignored)
 //   default output: public/studies/opening-lines.pgn
 import { readFileSync, writeFileSync } from 'node:fs'
 import { OPENINGS } from '../src/data/openings.ts'
 
-const input = process.argv[2] ?? 'data/studies/opening-lines-CZiXOjIp.raw.pgn'
+const input = process.argv[2] ?? 'data/studies/opening-lines-tournaments-phFA64zi.raw.pgn'
 const output = process.argv[3] ?? 'public/studies/opening-lines.pgn'
 
 const KEEP_HEADERS = new Set(['ChapterName', 'ChapterURL', 'FEN', 'SetUp', 'Variant', 'ECO', 'Opening', 'Orientation', 'Result'])

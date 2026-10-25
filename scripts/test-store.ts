@@ -15,6 +15,8 @@ import type { LineResultInputX } from '../src/store/achievements.ts'
 import * as ops from '../src/store/profileOps.ts'
 import * as storage from '../src/store/storage.ts'
 import { ActivityClock, gapCredit } from '../src/store/activityClock.ts'
+import { migrateLineStats } from '../src/store/lineMigration.ts'
+import { LINE_ID_MIGRATIONS } from '../src/data/lineMigrations.ts'
 import { addActiveTime, formatDuration, formatDurationShort, MAX_TIME_CREDIT_MS, normTimeSpent, TIME_BY_DAY_KEEP, timeSummary } from '../src/store/timeSpent.ts'
 import type { KeyValueStorage } from '../src/store/storage.ts'
 
@@ -44,7 +46,7 @@ const DAY = 24 * HOUR
 const T = (y: number, mo: number, d: number, h = 12, mi = 0): number => new Date(y, mo - 1, d, h, mi).getTime()
 const NOW = T(2026, 10, 14, 12, 0) // Wed 14 Oct 2026, noon local
 
-function fakeLine(id: string, userMoveCount = 6, chapterId = 'hF97JQsY', openingId = 'sicilian'): Line {
+function fakeLine(id: string, userMoveCount = 6, chapterId = 'nlQ9e14g', openingId = 'sicilian'): Line {
   return {
     id,
     openingId,
@@ -98,7 +100,7 @@ function patchProfile(data: AppData, id: string, patch: Partial<Profile>): AppDa
 }
 
 /** A minimal study PGN with one of the coach's chapters (Open Sicilian). */
-const STUDY_V2 = '[Event "x"]\n[ChapterURL "https://lichess.org/study/CZiXOjIp/hF97JQsY"]\n\n1. e4 *'
+const STUDY_V2 = '[Event "x"]\n[ChapterURL "https://lichess.org/study/phFA64zi/nlQ9e14g"]\n\n1. e4 *'
 
 function sum(b: { coins: number }[]): number {
   return b.reduce((s, x) => s + x.coins, 0)
@@ -673,7 +675,8 @@ await test('applyLineResult: time-of-day + triple threat achievements', () => {
 
 await test('applyLineResult: chapter + opening mastery (needs repertoire)', () => {
   const core = OPENINGS.find((o) => o.id === 'london')!.chapters
-  const extra = OPENINGS.find((o) => o.id === 'london')!.extraChapters[0]
+  // A chapter outside the opening's core list (e.g. a parent-enabled extra) never counts for opening mastery.
+  const extra = OPENINGS.find((o) => o.id === 'london')!.extraChapters[0] ?? { id: 'notCore1', title: 'Extra' }
   const l1 = fakeLine('l1', 4, core[0].id, 'london')
   const l2 = fakeLine('l2', 4, core[0].id, 'london')
   const l3 = fakeLine('l3', 4, core[1].id, 'london')
@@ -1603,6 +1606,50 @@ await test('appStore: unreadable save is never overwritten; dismissLoadIssue sta
   assert.equal(mem.getItem(storage.CORRUPT_KEY), original)
   unsub()
   storage.setStorageBackend(undefined)
+})
+
+// ---------------------------------------------------------------------------
+// Study replaced: line progress follows unchanged lines
+// ---------------------------------------------------------------------------
+
+await test('line migration: old ids are renamed, merged (better wins) and left alone otherwise', () => {
+  const map = { old1: 'new1', old2: 'new2', old3: 'new2', same: 'same' }
+  const s = {
+    old1: stats({ box: 2, lastPracticed: NOW - DAY }),
+    old2: stats({ box: 1, lastPracticed: NOW - HOUR }),
+    old3: stats({ box: 3, lastPracticed: NOW - 3 * DAY }), // same moves in two old chapters: box 3 wins
+    keep: stats({ box: 4 }), // not in the map (line gone or unchanged): untouched
+    same: stats({ box: 1 }),
+  }
+  const m = migrateLineStats(s, map)
+  assert.deepEqual(Object.keys(m).sort(), ['keep', 'new1', 'new2', 'same'])
+  assert.equal(m.new1, s.old1)
+  assert.equal(m.new2, s.old3)
+  assert.equal(m.keep, s.keep)
+  // an entry already under the new id stays unless the migrated one is better
+  const m2 = migrateLineStats({ old1: stats({ box: 1 }), new1: stats({ box: 2 }) }, map)
+  assert.equal(m2.new1.box, 2)
+  assert.equal(Object.keys(m2).length, 1)
+  // nothing to do -> the very same object (no re-render / re-save)
+  const plain = { a: stats({}) }
+  assert.equal(migrateLineStats(plain, map), plain)
+  assert.equal(migrateLineStats(plain, {}), plain)
+  // a stats key that matches an Object.prototype name is not looked up through the prototype
+  const proto: Record<string, LineStats> = { toString: stats({}) }
+  assert.equal(migrateLineStats(proto, map), proto)
+})
+
+await test('line migration runs when saved data / backups are loaded', () => {
+  const ids = Object.entries(LINE_ID_MIGRATIONS)
+  if (ids.length === 0) return // no study change recorded in this build
+  const [oldId, newId] = ids[0]
+  const d = patchProfile(fresh(), 'david', { lineStats: { [oldId]: stats({ box: 3 }) } })
+  const v = storage.validateAppData(JSON.parse(JSON.stringify(d)), NOW)
+  assert.ok(v.ok)
+  if (!v.ok) return
+  const ls = prof(v.data).lineStats
+  assert.equal(ls[oldId], undefined)
+  assert.equal(ls[newId].box, 3)
 })
 
 // ---------------------------------------------------------------------------

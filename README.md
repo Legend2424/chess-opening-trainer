@@ -7,26 +7,29 @@ trophies, or save up and ask a parent to redeem them for a Pokémon pack.
 
 ## Openings
 
-All lines come from the Lichess study **"Opening lines (For Minka and David)"**:
+All lines come from the coach's Lichess study **"Opening lines for Tournaments"** (every chapter,
+side lines included; it replaced "Opening lines (For Minka and David)" in October 2026):
 
 | Opening | You play | Chapters |
 | --- | --- | --- |
-| 🐉 Sicilian Defence | Black | Open Sicilian, Alapin, Smith-Morra, Closed, Side lines, Minka's Sicilian |
-| 🏰 London System | White | All the variations, King-side castle, vs ...c5, Old Benoni, Queen-side castle, London lines |
-| 🛡️ Black vs 1.d4 | Black | Queen's Gambit Declined, Queen's Gambit Accepted |
-
-More chapters (Delayed Alapin, Jobava London vs King's Indian, English, etc.) can be switched on
-in the Parent zone.
+| 🐉 Sicilian Defence | Black | Open Sicilian, Alapin, Delayed Alapin, Smith-Morra, Closed Sicilian, Side lines |
+| 🏰 London System | White | All the variations, vs ...c5, Old Benoni, Jobava London vs King's Indian |
+| 🛡️ Black vs 1.d4 | Black | Queen's Gambit Declined: 5.Bg5, 5.Bf4 and the Exchange variation |
 
 ## Updating the lines when the coach changes the study
 
 The study is private, so the app ships its own copy. Two ways to update it:
 
 1. **On the iPad (no computer needed):** on Lichess open the study → *Share* → *Download PGN*
-   (all chapters). In Opening Quest go to *Parent zone → Study data → Import PGN* and pick the file.
-2. **In the project:** save the full export as `data/studies/opening-lines-CZiXOjIp.raw.pgn`, run
-   `node scripts/extract-study.ts` (keeps only the chapters listed in `src/data/openings.ts` and strips
+   (all chapters). In Opening Quest go to *Parent zone → Data → Import PGN* and pick the file.
+2. **In the project:** save the full export as `data/studies/opening-lines-tournaments-phFA64zi.raw.pgn`,
+   run `node scripts/extract-study.ts` (keeps only the chapters listed in `src/data/openings.ts` and strips
    names/dates), then commit and push. New chapters need an entry in `src/data/openings.ts`.
+
+When the study changes, line ids change too. `node scripts/build-line-migrations.ts` maps every old line
+to the line with exactly the same moves now (`src/data/lineMigrations.ts`), so the kids keep their
+progress on lines that didn't change. Engine-checked corrections to the study live in
+`src/data/studyOverrides.ts`.
 
 ## Development
 

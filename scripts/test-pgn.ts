@@ -318,7 +318,10 @@ test('comments on nodes become MoveNode.comment / arrows / highlights; intro on 
 // ---------------------------------------------------------------------------
 
 const PUBLIC = new URL('../public/studies/opening-lines.pgn', import.meta.url)
-const RAW = new URL('../data/studies/opening-lines-CZiXOjIp.raw.pgn', import.meta.url)
+/** Full Lichess export of "Opening lines for Tournaments" (phFA64zi); gitignored. */
+const RAW = new URL('../data/studies/opening-lines-tournaments-phFA64zi.raw.pgn', import.meta.url)
+/** Chapters in the study (all of them are used by the app, so the public extract has them all). */
+const STUDY_CHAPTERS = 13
 
 /** Replays every node with chess.js's public API and checks SAN/uci/FENs. */
 function verifyTree(nodes: MoveNode[], chess: Chess): number {
@@ -355,9 +358,9 @@ function allChaptersDef(games: PgnGame[]): OpeningDef {
 
 console.log('\nReal study data')
 
-test('public extract: 23 chapters, all ids present, zero unplayable moves, SAN/FEN verified', () => {
+test(`public extract: ${STUDY_CHAPTERS} chapters, all ids present, zero unplayable moves, SAN/FEN verified`, () => {
   const games = parsePgnFile(readFileSync(PUBLIC, 'utf8'))
-  assert.equal(games.length, 23)
+  assert.equal(games.length, STUDY_CHAPTERS)
   const ids = games.map(chapterIdOf)
   assert.ok(ids.every((x) => x && x.length === 8), 'every chapter has a ChapterURL id')
   assert.equal(new Set(ids).size, games.length)
@@ -371,14 +374,14 @@ test('public extract: 23 chapters, all ids present, zero unplayable moves, SAN/F
 })
 
 if (existsSync(RAW)) {
-  test('raw export: all 53 chapters parse and build without throwing; zero unplayable moves', () => {
+  test(`raw export: all ${STUDY_CHAPTERS} chapters parse and build without throwing; zero unplayable moves`, () => {
     const t0 = performance.now()
     const games = parsePgnFile(readFileSync(RAW, 'utf8'))
     const t1 = performance.now()
-    assert.equal(games.length, 53)
+    assert.equal(games.length, STUDY_CHAPTERS)
     const ids = games.map(chapterIdOf)
     assert.ok(ids.every((x) => x && x.length === 8))
-    assert.equal(new Set(ids).size, 53)
+    assert.equal(new Set(ids).size, STUDY_CHAPTERS)
     // Parsing fidelity: build WITHOUT the study overrides (they cut/insert moves on purpose).
     const { result: rep, warnings } = silenceWarnings(() =>
       buildRepertoire(allChaptersDef(games), games, { maxPly: 0, enabledExtras: [], overrides: [] }),
@@ -386,7 +389,7 @@ if (existsSync(RAW)) {
     const t2 = performance.now()
     if (warnings.length) console.log(warnings.join('\n'))
     assert.equal(warnings.length, 0, 'unplayable SAN warnings')
-    assert.equal(rep.chapters.length, 53)
+    assert.equal(rep.chapters.length, STUDY_CHAPTERS)
     const empty = games.filter((g) => g.roots.length === 0).length
     const fenStarts = games.filter((g) => g.headers.FEN).length
     const clk = games.filter((g) => JSON.stringify(g.roots).includes('[%clk')).length
@@ -410,13 +413,15 @@ if (existsSync(RAW)) {
     // No [%...] command leaks into cleaned comments
     for (const node of rep.nodesById.values()) assert.ok(!node.comment || !node.comment.includes('[%'), `clean comment ${node.id}`)
     console.log(
-      `       53 chapters (${empty} empty, ${fenStarts} FEN start, ${clk} with [%clk]); ${n} nodes; parse ${(t1 - t0).toFixed(0)} ms, build ${(t2 - t1).toFixed(0)} ms; NAGs ${[...nags].map(([k, v]) => `$${k}x${v}`).join(' ')}`,
+      `       ${STUDY_CHAPTERS} chapters (${empty} empty, ${fenStarts} FEN start, ${clk} with [%clk]); ${n} nodes; parse ${(t1 - t0).toFixed(0)} ms, build ${(t2 - t1).toFixed(0)} ms; NAGs ${[...nags].map(([k, v]) => `$${k}x${v}`).join(' ')}`,
     )
   })
 
-  test('public extract has the same move trees as the raw export for its 23 chapters', () => {
+  test(`public extract has the same move trees as the raw export for its ${STUDY_CHAPTERS} chapters`, () => {
     const raw = parsePgnFile(readFileSync(RAW, 'utf8'))
     const pub = parsePgnFile(readFileSync(PUBLIC, 'utf8'))
+    assert.equal(pub.length, STUDY_CHAPTERS)
+    assert.deepEqual(pub.map(chapterIdOf).sort(), raw.map(chapterIdOf).sort(), 'the extract carries every chapter of the raw export')
     const def = allChaptersDef(pub)
     const a = buildRepertoire(def, pub, { maxPly: 0, enabledExtras: [] })
     const b = buildRepertoire(def, raw, { maxPly: 0, enabledExtras: [] })

@@ -6,6 +6,7 @@ import { parsePgnFile } from '../src/chess/pgn.ts'
 import { bookMovesAt, buildRepertoire, isBlunder, isDubious, positionKey, userColorOf } from '../src/chess/repertoire.ts'
 import { pickLine, seededRng, updateLineStats } from '../src/chess/scheduler.ts'
 import { OPENINGS } from '../src/data/openings.ts'
+import type { StudyOverride } from '../src/data/studyOverrides.ts'
 import { currentNode, expectedNode, initTrainer, trainerReducer, userMoveIndex } from '../src/trainer/trainerReducer.ts'
 import type { FeedbackKind, TrainerConfig, TrainerContext, TrainerState } from '../src/trainer/trainerReducer.ts'
 import type { Line, MoveNode, OpeningDef, Repertoire, TrainerMode } from '../src/types.ts'
@@ -328,7 +329,7 @@ function findAlt(rep: Repertoire, want: (n: MoveNode, line: Line, ply: number) =
   return null
 }
 
-test('known-bad: a real dubious user move from the study (London 9.Bd3??, vs-d4 8...dxc4?!)', () => {
+test('known-bad: a real dubious user move from the study (Sicilian 5...Nxd4?, London 9.Bd3??, vs-d4 8...dxc4?!)', () => {
   let found = 0
   for (const rep of reps30) {
     const hit = findAlt(rep, (n) => isDubious(n))
@@ -357,12 +358,20 @@ test('known-bad: a real dubious user move from the study (London 9.Bd3??, vs-d4 
       `       ${rep.opening.id}: ${hit.node.moveNumber}${hit.node.color === 'w' ? '.' : '...'}${hit.node.san} (nags ${hit.node.nags}) refuted by ${r.feedback?.refutation?.san} in line "${hit.line.name}"`,
     )
   }
-  assert.equal(found, 3, 'Sicilian (7...Bxf3?, an override), London and vs-d4 each have a reachable dubious user move')
+  assert.equal(found, 3, 'Sicilian, London and vs-d4 each have a reachable dubious user move')
   // also in random mode
   const rep = reps30[1]
   const hit = findAlt(rep, (n) => isDubious(n))!
   const { s, ctx } = reach(rep, hit.line, hit.ply, 'random')
   assert.equal(playNode(s, ctx, hit.node).feedback?.kind, 'known-bad')
+  // …and a move marked by an override (studyOverrides.ts), not by the coach: Alapin 10...Qxb2?? 11.Rb1.
+  const sic = reps30[0]
+  const qxb2 = findAlt(sic, (n) => n.san === 'Qxb2' && isDubious(n))
+  assert.ok(qxb2, '10...Qxb2?? is a book alternative after 10.O-O')
+  const q = reach(sic, qxb2.line, qxb2.ply)
+  const rq = playNode(q.s, q.ctx, qxb2.node)
+  assert.equal(rq.feedback?.kind, 'known-bad')
+  assert.equal(rq.feedback?.refutation?.san, 'Rb1')
 })
 
 test("inorder: a different non-dubious book move -> 'other-line', not played, no mistake, free highlight", () => {
@@ -792,7 +801,10 @@ test('real study (maxPly 0): every cross-ply-only study move is other-line in ra
       }
     }
   }
-  console.log(`       ${checked} cross-ply-only study moves checked`)
+  console.log(
+    `       ${checked} cross-ply-only study moves checked` +
+      (checked === 0 ? ' (this study has none; the synthetic "another ply / another start" test covers the rule)' : ''),
+  )
 })
 
 test('random-mode fuzz (maxPly 0, all extras): history.length === ply, board on the line, candidates consistent', () => {
@@ -833,26 +845,62 @@ test('random-mode fuzz (maxPly 0, all extras): history.length === ply, board on 
 // ---------------------------------------------------------------------------
 console.log('Review fixes: overrides by transposition, tails, blunders in any chapter')
 
-test('random mode: 7...Bxf3? reached by the other move order is known-bad, not "also in your study" (chess #1)', () => {
-  const rep = reps30[0]
-  // Alapin main line: 4.Nf3 Bg4 5.Be2 Nf6 6.d4 e6 7.c4 (7...Qd7 is the move).
-  const line = rep.lines.find((l) => l.moves.map((m) => m.san).join(' ').startsWith('e4 c5 c3 d5 exd5 Qxd5 Nf3 Bg4 Be2 Nf6 d4 e6 c4 Qd7'))
-  assert.ok(line, 'Alapin 7.c4 Qd7 line')
-  const ply = line!.moves.findIndex((m) => m.san === 'Qd7')
-  const { s, ctx } = reach(rep, line!, ply, 'random')
-  const r = play(s, ctx, 'g4', 'f3')
-  assert.equal(r.feedback?.kind, 'known-bad')
-  assert.equal(r.phase, 'wrongMove')
-  assert.equal(r.feedback?.refutation?.san, 'cxd5')
+test('random mode: a ?-marked move reached by the other move order is known-bad, not "also in your study" (chess #1)', () => {
+  // Real study: 5...Nxd4? is marked in "Side lines" (2.c4 Nc6 3.Nf3 g6 4.d4 cxd4 5.Nxd4); the Open
+  // Sicilian reaches the same position by 2.Nf3 Nc6 3.d4 cxd4 4.Nxd4 g6 5.c4 (5...Bg7 is the move).
+  {
+    const rep = reps30[0]
+    const line = rep.lines.find((l) => l.chapterId === 'nlQ9e14g' && l.moves.map((m) => m.san).join(' ').startsWith('e4 c5 Nf3 Nc6 d4 cxd4 Nxd4 g6 c4 Bg7'))
+    assert.ok(line, 'Open Sicilian 5.c4 Bg7 line')
+    const ply = line!.moves.findIndex((m) => m.san === 'Bg7')
+    const { s, ctx } = reach(rep, line!, ply, 'random')
+    const r = play(s, ctx, 'c6', 'd4')
+    assert.equal(r.feedback?.kind, 'known-bad')
+    assert.equal(r.phase, 'wrongMove')
+    assert.equal(r.feedback?.node?.chapterId, 'L3QbzELB')
+    assert.equal(r.feedback?.refutation?.san, 'Qxd4')
+  }
+  // An OVERRIDE mark reaching a node the study plays unmarked by another move order (the old
+  // Alapin 7...Bxf3? case) has no real example in this study: synthetic two-chapter study.
+  // Chapter A plays 9...Nd5 and an override marks it ? with the engine reply 10.Bxd5; chapter B
+  // reaches the same position by 5.Bc4 6.Nf3, plays 9...Ng8 and keeps 9...Nd5 as a plain side-line.
+  const url = (id: string) => `[ChapterURL "https://lichess.org/study/TEST0000/${id}"]`
+  const pgn = [
+    `${url('SYNSMORA')}\n\n1. e4 c5 2. d4 cxd4 3. c3 dxc3 4. Nxc3 Nc6 5. Nf3 g6 6. Bc4 Bg7 7. O-O Nf6 8. h3 e6 9. e5 Nd5 10. Nxd5 exd5 *`,
+    `${url('SYNSMORB')}\n\n1. e4 c5 2. d4 cxd4 3. c3 dxc3 4. Nxc3 Nc6 5. Bc4 g6 6. Nf3 Bg7 7. O-O Nf6 8. h3 e6 9. e5 Ng8 (9... Nd5 10. Nxd5 exd5) *`,
+  ].join('\n\n')
+  const overrides: StudyOverride[] = [
+    { chapterId: 'SYNSMORA', path: 'e4 c5 d4 cxd4 c3 dxc3 Nxc3 Nc6 Nf3 g6 Bc4 Bg7 O-O Nf6 h3 e6 e5 Nd5', action: 'nag', nag: 2, reply: 'Bxd5' },
+  ]
+  const def: OpeningDef = { ...synDef, id: 'synmorra', chapters: [{ id: 'SYNSMORA', title: 'A' }, { id: 'SYNSMORB', title: 'B' }] }
+  const rep = buildRepertoire(def, parsePgnFile(pgn), { maxPly: 0, enabledExtras: [], overrides })
+  const line = rep.lines.find((l) => l.chapterId === 'SYNSMORB')!
+  assert.equal(line.moves[line.moves.length - 1].san, 'Ng8')
+  const ply = line.moves.length - 1
+  for (const mode of ['random', 'inorder'] as const) {
+    const { s, ctx } = reach(rep, line, ply, mode)
+    const r = play(s, ctx, 'f6', 'd5')
+    assert.equal(r.feedback?.kind, 'known-bad', mode)
+    assert.equal(r.phase, 'wrongMove')
+    assert.equal(r.feedback?.refutation?.san, 'Bxd5')
+  }
+  // Without the override the very same move is a good book move of chapter A.
+  const bare = buildRepertoire(def, parsePgnFile(pgn), { maxPly: 0, enabledExtras: [], overrides: [] })
+  const bareLine = bare.lines.find((l) => l.chapterId === 'SYNSMORB' && l.moves[l.moves.length - 1].san === 'Ng8')!
+  const { s, ctx } = reach(bare, bareLine, ply, 'random')
+  const r = play(s, ctx, 'f6', 'd5')
+  assert.equal(r.feedback?.kind, 'book-alt', 'bare: 9...Nd5 is just another book move')
 })
 
 test('tail: after the last user move the study\'s reply / trap demo plays; ids and counts unchanged (chess #2, #5)', () => {
   let tails = 0
+  let traps = 0
   for (const rep of reps30) {
     const ctx = ctxOf(rep)
     for (const line of rep.lines) {
       if (!line.tail) continue
       tails++
+      if (line.tailIsTrap) traps++
       const { s } = drive(initTrainer(line, cfg(rep, 'inorder'), ctx), ctx)
       assert.equal(s.phase, 'complete')
       assert.equal(s.tailPly, 0)
@@ -877,11 +925,23 @@ test('tail: after the last user move the study\'s reply / trap demo plays; ids a
     const s0 = initTrainer(l0, cfg(rep, 'inorder'), ctx)
     assert.equal(trainerReducer(s0, { type: 'tailMove' }), s0)
   }
-  assert.ok(tails > 20, `${tails} lines with a tail`)
+  // "Opening lines for Tournaments" at maxPly 30: 11 lines with a tail, 2 of them trap demos
+  // (Sicilian 13...Qd7?? 14.Nxd6+ and 9...Nd5? 10.Bxd5).
+  assert.ok(tails >= 11, `${tails} lines with a tail`)
+  assert.ok(traps >= 2, `${traps} trap demos`)
 })
 
 test('opponent blunder marked in another chapter counts here too (chess #7)', () => {
-  const rep = reps30[1] // London: 4...Qb6? is marked in "All the variations", not in "Against ...c5"
+  // The coach's study has no real case any more (it was London 4...Qb6?, marked in one chapter
+  // only), so a synthetic London study: the coach marks 4...Qxb2?? in chapter X (3.e3 Qb6 4.Nc3);
+  // chapter Y reaches the same position by 3.Nc3 Qb6 4.e3 and plays 4...Qxb2 without a mark.
+  const pgn = [
+    '[ChapterURL "https://lichess.org/study/TEST0000/SYNOPPXX"]\n\n1. d4 d5 2. Bf4 c5 3. e3 Qb6 4. Nc3 Qxb2?? 5. Nxd5 *',
+    '[ChapterURL "https://lichess.org/study/TEST0000/SYNOPPYY"]\n\n1. d4 d5 2. Bf4 c5 3. Nc3 Qb6 4. e3 Qxb2 5. Nxd5 Nf6 6. Bb5+ *',
+  ].join('\n\n')
+  const def: OpeningDef = { ...synDef, id: 'synopp', side: 'white', chapters: [{ id: 'SYNOPPXX', title: 'X' }, { id: 'SYNOPPYY', title: 'Y' }] }
+  const rep = buildRepertoire(def, parsePgnFile(pgn), { maxPly: 0, enabledExtras: [] })
+  assert.ok(rep.lines.find((l) => l.chapterId === 'SYNOPPYY')!.moves.some((m) => m.san === 'Qxb2' && !isBlunder(m)), 'unmarked in Y')
   const keys = new Set<string>()
   for (const n of rep.nodesById.values()) if (isBlunder(n)) keys.add(`${positionKey(n.fenBefore)}|${n.uci}`)
   const hit = rep.lines.find((l) =>

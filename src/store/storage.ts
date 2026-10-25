@@ -15,6 +15,8 @@ import type {
   TimeSpent,
 } from '../types.ts'
 import { normTimeSpent } from './timeSpent.ts'
+import { migrateLineStats } from './lineMigration.ts'
+import { LINE_ID_MIGRATIONS } from '../data/lineMigrations.ts'
 import { findItem, itemById, DEFAULT_EQUIPPED, FREE_ITEM_IDS } from './catalog.ts'
 import {
   createDefaultAppData,
@@ -320,7 +322,8 @@ function normProfile(x: unknown, now: number): Profile | string {
     color: typeof x.color === 'string' && x.color ? x.color.slice(0, 40) : (seed?.color ?? '#6c4bf4'),
     coins: Math.floor(x.coins),
     xp: Math.floor(x.xp),
-    lineStats,
+    // A new study renames lines; progress follows lines whose moves didn't change.
+    lineStats: migrateLineStats(lineStats, LINE_ID_MIGRATIONS),
     inOrderIndex,
     owned,
     equipped,
