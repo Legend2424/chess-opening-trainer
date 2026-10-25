@@ -4,10 +4,10 @@ import { readFileSync } from 'node:fs'
 import { Chess } from 'chess.js'
 import { parsePgnFile } from '../src/chess/pgn.ts'
 import { bookMovesAt, buildRepertoire, isBlunder, isDubious, positionKey, userColorOf } from '../src/chess/repertoire.ts'
-import { pickLine, seededRng, updateLineStats } from '../src/chess/scheduler.ts'
+import { pickCoachLine, pickLine, seededRng, updateLineStats } from '../src/chess/scheduler.ts'
 import { OPENINGS } from '../src/data/openings.ts'
 import type { StudyOverride } from '../src/data/studyOverrides.ts'
-import { currentNode, expectedNode, initTrainer, trainerReducer, userMoveIndex } from '../src/trainer/trainerReducer.ts'
+import { currentNode, expectedNode, initTrainer, skippedUserMoves, trainerReducer, userMoveIndex } from '../src/trainer/trainerReducer.ts'
 import type { FeedbackKind, TrainerConfig, TrainerContext, TrainerState } from '../src/trainer/trainerReducer.ts'
 import type { Line, MoveNode, OpeningDef, Repertoire, TrainerMode } from '../src/types.ts'
 
@@ -953,6 +953,424 @@ test('opponent blunder marked in another chapter counts here too (chess #7)', ()
   const { s, log } = drive(initTrainer(hit!, cfg(rep, 'inorder'), ctx), ctx)
   assert.ok(log.includes('opponent-blunder'))
   assert.equal(s.opponentBlundered, true)
+})
+
+// ---------------------------------------------------------------------------
+console.log('Branch starts and pinned Coach\'s Choice (docs/practice-structure.md §2)')
+
+/** Every deep / Plan B line with a branch start (startPly > 0), in all builds. */
+const branchLines = [...reps30, ...reps0].flatMap((rep) =>
+  rep.lines.filter((l) => (l.tier === 'deep' || l.tier === 'planb') && (l.startPly ?? 0) > 0).map((line) => ({ rep, line })),
+)
+
+test('initTrainer with startPly: skipped prefix in history, skip marks, kid to move; plays to the end', () => {
+  assert.ok(branchLines.length > 100, `${branchLines.length} branch-start lines`)
+  for (const { rep, line } of branchLines) {
+    const u = userColorOf(rep.opening)
+    const sp = line.startPly!
+    const ctx = ctxOf(rep, prefer(line.id))
+    const s = initTrainer(line, cfg(rep, 'lap'), ctx, sp)
+    assert.equal(s.startPly, sp)
+    assert.equal(s.ply, sp)
+    assert.equal(s.history.length, sp)
+    assert.ok(s.history.every((h) => h.skipped === true))
+    assert.deepEqual(s.history.map((h) => h.nodeId), line.moves.slice(0, sp).map((m) => m.id))
+    assert.deepEqual(s.history.map((h) => h.by), line.moves.slice(0, sp).map((m) => (m.color === u ? 'user' : 'opponent')))
+    assert.equal(s.fen, line.moves[sp - 1].fen)
+    assert.deepEqual(s.lastMove, [line.moves[sp - 1].from, line.moves[sp - 1].to])
+    const kidBefore = line.moves.slice(0, sp).filter((m) => m.color === u).length
+    assert.equal(s.userMoveMarks.length, line.userMoveCount)
+    assert.deepEqual(s.userMoveMarks.slice(0, kidBefore), new Array(kidBefore).fill('skip'))
+    assert.ok(s.userMoveMarks.slice(kidBefore).every((m) => m === 'pending'))
+    assert.equal(skippedUserMoves(s), kidBefore)
+    assert.equal(s.phase, 'userToMove')
+    assert.equal(expectedNode(s), line.moves[sp])
+    assert.equal(currentNode(s), line.moves[sp - 1])
+    assert.equal(userMoveIndex(s), kidBefore)
+    assert.equal(s.mistakes, 0)
+    // Play to the end: the other marks are clean.
+    const { s: done } = drive(s, ctx)
+    assert.equal(done.phase, 'complete')
+    assert.equal(done.line, line)
+    assert.equal(done.history.length, line.moves.length)
+    assert.deepEqual(done.userMoveMarks.slice(0, kidBefore), new Array(kidBefore).fill('skip'))
+    assert.ok(done.userMoveMarks.slice(kidBefore).every((m) => m === 'clean'))
+    assert.equal(done.userMoveMarks.filter((m) => m !== 'skip').length, line.userMoveCount - kidBefore)
+    assert.equal(done.history.filter((h) => h.skipped).length, sp)
+    // The tail still follows (history.length === ply + tailPly).
+    let t = done
+    for (let k = 0; k < (line.tail?.length ?? 0); k++) t = trainerReducer(t, { type: 'tailMove' })
+    assert.equal(t.history.length, t.ply + t.tailPly)
+  }
+  console.log(`       ${branchLines.length} branch-start lines played from their startPly`)
+})
+
+test('restart returns to startPly with the same skips; a wrong move + takeBack restores the branch position', () => {
+  for (const { rep, line } of branchLines.slice(0, 40)) {
+    const sp = line.startPly!
+    const ctx = ctxOf(rep, prefer(line.id))
+    const s0 = initTrainer(line, cfg(rep, 'lap'), ctx, sp)
+    // wrong move at the first kid move to play
+    const bad = nonBookMove(rep, s0.fen)
+    const w = play(s0, ctx, bad.from, bad.to, bad.promotion)
+    assert.equal(w.phase, 'wrongMove')
+    assert.equal(w.history.length, sp)
+    const tb = trainerReducer(w, { type: 'takeBack' })
+    assert.equal(tb.phase, 'userToMove')
+    assert.equal(tb.fen, line.moves[sp - 1].fen)
+    assert.deepEqual(tb.lastMove, [line.moves[sp - 1].from, line.moves[sp - 1].to])
+    assert.equal(tb.history, s0.history)
+    // a few moves on, then restart
+    const mid = drive(tb, ctx, (st) => st.ply >= Math.min(line.moves.length - 1, sp + 3)).s
+    const r = trainerReducer(mid, { type: 'restart' })
+    for (const k of ['ply', 'fen', 'history', 'lastMove', 'phase', 'wrong', 'mistakes', 'userMoveMarks', 'startPly', 'tailPly'] as const) {
+      assert.deepEqual(r[k], s0[k], k)
+    }
+    assert.ok(r.feedbackSeq >= mid.feedbackSeq)
+    assert.equal(drive(r, ctx).s.phase, 'complete')
+  }
+})
+
+test('startPly is ignored in random mode; an invalid startPly starts from move 1', () => {
+  const { rep, line } = branchLines[0]
+  const u = userColorOf(rep.opening)
+  const ctx = ctxOf(rep, prefer(line.id))
+  const fresh0 = initTrainer(line, cfg(rep, 'lap'), ctx)
+  assert.equal(fresh0.startPly, 0)
+  assert.equal(fresh0.history.length, 0)
+  assert.equal(skippedUserMoves(fresh0), 0)
+  const same = (s: TrainerState) => {
+    assert.equal(s.startPly, 0)
+    assert.equal(s.ply, 0)
+    assert.equal(s.fen, line.startFen)
+    assert.deepEqual(s.history, [])
+    assert.equal(s.lastMove, null)
+    assert.ok(s.userMoveMarks.every((m) => m === 'pending'))
+  }
+  const rnd = initTrainer(line, cfg(rep, 'random'), ctx, line.startPly)
+  same(rnd)
+  assert.ok(rnd.candidates.length > 1, 'random mode as before')
+  const oppIdx = line.moves.findIndex((m, k) => k > 0 && m.color !== u)
+  for (const bad of [oppIdx, 0, -2, line.moves.length, line.moves.length + 5, 1.5, NaN, Infinity]) {
+    same(initTrainer(line, cfg(rep, 'lap'), ctx, bad))
+  }
+  // A prefix that doesn't replay (moves out of order) -> from move 1.
+  const broken: Line = { ...line, moves: [line.moves[1], line.moves[0], ...line.moves.slice(2)] }
+  const kidIdx = broken.moves.findIndex((m, k) => k >= 2 && m.color === u)
+  assert.ok(kidIdx > 0)
+  same(initTrainer(broken, cfg(rep, 'inorder'), ctx, kidIdx))
+  // Other fixed-target modes accept it too.
+  for (const mode of ['inorder', 'chapter', 'main'] as const) assert.equal(initTrainer(line, cfg(rep, mode), ctx, line.startPly).ply, line.startPly)
+})
+
+test("Plan B from its startPly in lap mode: the first-choice move is 'other-line' (no mistake), the Plan B move advances", () => {
+  let found = 0
+  for (const rep of reps30) {
+    const u = userColorOf(rep.opening)
+    for (const line of rep.lines) {
+      if (line.tier !== 'planb' || !line.startPly) continue
+      const bp = line.branchPly!
+      const dev = line.moves[bp]
+      if (dev.color !== u || line.startPly !== bp - 2) continue
+      const first = line.moves[bp - 1].children[0]
+      if (!first || first === dev || isDubious(first)) continue
+      const ctx = ctxOf(rep, prefer(line.id))
+      let s = initTrainer(line, cfg(rep, 'lap'), ctx, line.startPly)
+      s = playNode(s, ctx, line.moves[line.startPly]) // the known move
+      assert.equal(s.phase, 'opponentToMove')
+      s = opp(s, ctx)
+      assert.equal(s.ply, bp)
+      assert.equal(expectedNode(s), dev)
+      const o = playNode(s, ctx, first)
+      assert.equal(o.feedback?.kind, 'other-line')
+      assert.equal(o.mistakes, 0)
+      assert.equal(o.ply, bp)
+      assert.equal(o.fen, s.fen)
+      assert.equal(o.hintLevel, 1, 'the right piece glows for free')
+      const a = playNode(o, ctx, dev)
+      assert.ok(a.feedback?.kind === 'correct' || a.feedback?.kind === 'complete')
+      assert.equal(a.ply, bp + 1)
+      assert.equal(a.userMoveMarks[userMoveIndex(s)], 'clean')
+      const { s: done } = drive(a, ctx)
+      assert.equal(done.phase, 'complete')
+      assert.equal(done.mistakes, 0)
+      found++
+    }
+  }
+  assert.ok(found >= 10, `${found} Plan B lines checked`)
+  console.log(`       ${found} Plan B lines: first choice -> other-line, Plan B move -> advances`)
+})
+
+test("pinned Coach's Choice: 500 runs per opening, the completed line is always the picked line", () => {
+  const NOW = Date.UTC(2026, 9, 25, 12)
+  for (const rep of reps30) {
+    const st = Object.fromEntries(rep.lines.map((l) => [l.id, { attempts: 1, completions: 1, perfects: 1, box: 1, lastPracticed: 0, dueAt: NOW, lastMistakes: 0 }]))
+    const rng = seededRng(500)
+    let reachedPinned = 0
+    let reachedUnpinned = 0
+    for (let i = 0; i < 500; i++) {
+      const target = pickCoachLine(rep.lines, st, NOW, { rng })
+      assert.notEqual(target.tier, 'planb')
+      for (const pinned of [true, false]) {
+        const ctx = ctxOf(rep, (ls) => (pinned && ls.find((l) => l.id === target.id)) || pickCoachLine(ls, st, NOW, { rng }))
+        const s0 = initTrainer(target, cfg(rep, 'random'), ctx)
+        assert.equal(s0.startPly, 0)
+        const { s } = drive(s0, ctx)
+        assert.equal(s.phase, 'complete')
+        assert.equal(s.mistakes, 0)
+        if (s.line.id === target.id) {
+          if (pinned) reachedPinned++
+          else reachedUnpinned++
+        }
+      }
+    }
+    assert.equal(reachedPinned, 500, rep.opening.id)
+    console.log(`       ${rep.opening.id}: picked line reached ${reachedPinned}/500 pinned, ${reachedUnpinned}/500 without the pin`)
+  }
+})
+
+// ---- useTrainer hook (driven in node) ------------------------------------------------------------
+// A minimal stand-in for React's renderer: one component, React's own hook entry points routed to
+// a small dispatcher (state / ref / memo / callback / effect), and fake timers for the hook's
+// window.setTimeout (opponent replies, tail moves, the modal delay). Timers of 1.5 s or more (engine
+// preload, tail reading time) never fire, so no Stockfish worker is started.
+
+interface FakeTimer {
+  id: number
+  at: number
+  delay: number
+  fn: () => void
+}
+const fakeTimers: FakeTimer[] = []
+let fakeClock = 0
+let fakeTimerId = 0
+;(globalThis as unknown as { window: unknown }).window = {
+  setTimeout: (fn: () => void, ms = 0) => {
+    const id = ++fakeTimerId
+    fakeTimers.push({ id, at: fakeClock + ms, delay: ms, fn })
+    return id
+  },
+  clearTimeout: (id: number | undefined) => {
+    const k = fakeTimers.findIndex((t) => t.id === id)
+    if (k >= 0) fakeTimers.splice(k, 1)
+  },
+}
+
+const React = (await import('react')).default as unknown as {
+  __SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED: { ReactCurrentDispatcher: { current: unknown } }
+}
+const { useTrainer } = await import('../src/trainer/useTrainer.ts')
+const { actions, getActiveProfile } = await import('../src/store/appStore.ts')
+type TrainerApiT = ReturnType<typeof useTrainer>
+
+interface HookSlot {
+  v?: unknown
+  deps?: readonly unknown[]
+  cleanup?: unknown
+  set?: (u: unknown) => void
+  current?: unknown
+}
+
+function mountHook<T>(fn: () => T): { readonly api: T; render: () => void; unmount: () => void } {
+  const internals = React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.ReactCurrentDispatcher
+  const slots: HookSlot[] = []
+  let k = 0
+  let dirty = false
+  let effects: Array<() => void> = []
+  const same = (a: readonly unknown[] | undefined, b: readonly unknown[] | undefined) =>
+    !!a && !!b && a.length === b.length && a.every((x, j) => Object.is(x, b[j]))
+  const dispatcher = {
+    useState(init: unknown) {
+      const j = k++
+      let s = slots[j]
+      if (!s) {
+        const slot: HookSlot = { v: typeof init === 'function' ? (init as () => unknown)() : init }
+        slot.set = (u: unknown) => {
+          const nv = typeof u === 'function' ? (u as (p: unknown) => unknown)(slot.v) : u
+          if (!Object.is(nv, slot.v)) {
+            slot.v = nv
+            dirty = true
+          }
+        }
+        s = slots[j] = slot
+      }
+      return [s.v, s.set]
+    },
+    useRef(init: unknown) {
+      const j = k++
+      return (slots[j] ??= { current: init })
+    },
+    useMemo(f: () => unknown, deps: readonly unknown[]) {
+      const j = k++
+      const s = slots[j]
+      if (s && same(s.deps, deps)) return s.v
+      const v = f()
+      slots[j] = { v, deps }
+      return v
+    },
+    useCallback(f: unknown, deps: readonly unknown[]) {
+      return dispatcher.useMemo(() => f, deps)
+    },
+    useEffect(f: () => unknown, deps?: readonly unknown[]) {
+      const j = k++
+      const s = slots[j]
+      if (s && deps && same(s.deps, deps)) return
+      const prevCleanup = s?.cleanup
+      const slot: HookSlot = { deps }
+      slots[j] = slot
+      effects.push(() => {
+        if (typeof prevCleanup === 'function') prevCleanup()
+        slot.cleanup = f()
+      })
+    },
+  }
+  let result: T | undefined
+  const render = () => {
+    for (let n = 0; n < 100; n++) {
+      dirty = false
+      const prev = internals.current
+      internals.current = dispatcher
+      k = 0
+      try {
+        result = fn()
+      } finally {
+        internals.current = prev
+      }
+      const run = effects
+      effects = []
+      for (const e of run) e()
+      if (!dirty) return
+    }
+    throw new Error('mountHook: render loop')
+  }
+  render()
+  return {
+    get api() {
+      return result as T
+    },
+    render,
+    unmount() {
+      for (const s of slots) if (s && typeof s.cleanup === 'function') (s.cleanup as () => void)()
+    },
+  }
+}
+
+/** Runs the due fake timers (shortest-delay first by due time) until only long ones (>= 1.5 s) remain. */
+function flushTimers(h: { render: () => void }): void {
+  for (let n = 0; n < 1000; n++) {
+    const due = fakeTimers.filter((t) => t.delay < 1500).sort((a, b) => a.at - b.at || a.id - b.id)[0]
+    if (!due) return
+    fakeTimers.splice(fakeTimers.indexOf(due), 1)
+    fakeClock = Math.max(fakeClock, due.at)
+    due.fn()
+    h.render()
+  }
+  throw new Error('flushTimers: runaway timers')
+}
+
+/** Plays the current line cleanly to the end (tail included); returns the completion's outcome. */
+function playLineClean(h: { readonly api: TrainerApiT; render: () => void }): NonNullable<TrainerApiT['outcome']> {
+  const before = h.api.outcome?.id ?? 0
+  for (let n = 0; n < 400; n++) {
+    flushTimers(h)
+    const s = h.api.state
+    assert.ok(s, 'trainer state')
+    if (s.phase === 'complete') {
+      const o = h.api.outcome
+      assert.ok(o && o.id > before, 'one new outcome per completion')
+      return o
+    }
+    assert.equal(s.phase, 'userToMove')
+    const exp = expectedNode(s)
+    assert.ok(exp)
+    assert.ok(h.api.userMove(exp.from, exp.to, exp.promotion), `${s.line.id}: ${exp.san} is played`)
+    h.render()
+  }
+  throw new Error('playLineClean: line did not finish')
+}
+
+const repD4 = reps30.find((r) => r.opening.id === 'vs-d4')
+assert.ok(repD4, 'vs-d4 repertoire')
+
+test('useTrainer lap: "Lap N complete" (lap.justCompleted) is cleared by Try again and by the next line (review A#1)', () => {
+  actions.selectProfile('david')
+  const h = mountHook(() => useTrainer(repD4, { mode: 'lap', learnMode: false }))
+  try {
+    const lap0 = h.api.lap
+    assert.ok(lap0 && lap0.total > 1)
+    assert.equal(lap0.justCompleted, null)
+    const coins0 = h.api.sessionCoins
+    let paid = 0
+    let rolled: NonNullable<TrainerApiT['outcome']> | null = null
+    for (let n = 0; n < lap0.total && !rolled; n++) {
+      if (n > 0) {
+        h.api.nextLine()
+        h.render()
+      }
+      const o = playLineClean(h)
+      paid += o.reward.coins
+      assert.equal(h.api.sessionCoins - coins0, paid, 'session chip = coins paid (lap bonus included)')
+      if (o.reward.lap?.completed) rolled = o
+      else assert.equal(h.api.lap?.justCompleted, null)
+    }
+    assert.ok(rolled, 'a clean pass over the lap set completes the lap')
+    assert.equal(h.api.lap?.justCompleted?.completed, true)
+    assert.equal(h.api.lap?.justCompleted?.n, lap0.n)
+    assert.ok((h.api.lap?.justCompleted?.coins ?? 0) > 0)
+    // "Try again" on the lap-completing line: the banner must not survive into the retry.
+    h.api.restart()
+    h.render()
+    assert.equal(h.api.lap?.justCompleted, null, 'restart clears justCompleted')
+    const retry = playLineClean(h)
+    paid += retry.reward.coins
+    assert.notEqual(retry.reward.lap?.completed, true)
+    assert.equal(h.api.lap?.justCompleted, null, 'the retry did not complete a lap')
+    assert.equal(h.api.lap?.n, lap0.n + 1)
+    assert.equal(h.api.sessionCoins - coins0, paid)
+    h.api.nextLine()
+    h.render()
+    assert.equal(h.api.lap?.justCompleted, null)
+  } finally {
+    h.unmount()
+  }
+})
+
+test('useTrainer main round: the session coin chip includes the round outcome coins, once (review A#2)', () => {
+  actions.selectProfile('minka')
+  assert.equal(getActiveProfile()?.id, 'minka')
+  const h = mountHook(() => useTrainer(repD4, { mode: 'main', learnMode: false }))
+  try {
+    const coins0 = h.api.sessionCoins
+    const lines0 = h.api.sessionLines
+    let linePaid = 0
+    let lines = 0
+    for (let n = 0; n < 20 && !h.api.round?.result; n++) {
+      if (n > 0) {
+        h.api.nextLine()
+        h.render()
+      }
+      const o = playLineClean(h)
+      lines++
+      linePaid += o.reward.coins
+      assert.equal(o.roundDone, !!h.api.round?.result)
+    }
+    const res = h.api.round?.result
+    assert.ok(res, 'the round ends')
+    assert.equal(res.clean, true)
+    assert.equal(lines, h.api.round?.size)
+    assert.ok(res.outcome.ok && res.outcome.coins > 0, 'the first round of the day pays a bonus')
+    assert.equal(h.api.sessionCoins - coins0, linePaid + res.outcome.coins, 'line coins + round coins')
+    assert.equal(h.api.sessionLines - lines0, lines, 'the round is not a line')
+    // "Try again" after the round: a repeat line, the round (and its coins) is not paid again.
+    h.api.restart()
+    h.render()
+    const again = playLineClean(h)
+    assert.equal(again.roundDone, false)
+    assert.equal(h.api.round?.result, res)
+    assert.equal(h.api.sessionCoins - coins0, linePaid + res.outcome.coins + again.reward.coins)
+  } finally {
+    h.unmount()
+  }
 })
 
 if (trainerWarnings.length) {

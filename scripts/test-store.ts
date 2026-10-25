@@ -2,7 +2,7 @@
 // Plain node + node:assert. Builds fake Line/Repertoire objects (no PGN parser needed).
 
 import assert from 'node:assert/strict'
-import type { AppData, Line, LineStats, ParentSettings, Profile, Repertoire } from '../src/types.ts'
+import type { AppData, Line, LineStats, LineTier, ParentSettings, Profile, Repertoire } from '../src/types.ts'
 import { BOARD_THEME_IDS, EFFECT_IDS, PIECE_SET_IDS } from '../src/types.ts'
 import { OPENINGS } from '../src/data/openings.ts'
 import { CATALOG, FREE_ITEM_IDS, itemById } from '../src/store/catalog.ts'
@@ -13,6 +13,19 @@ import { computeLineReward, currentStreak, engineGameCoins, nextLineStats, stars
 import { ACHIEVEMENTS, checkAchievements } from '../src/store/achievements.ts'
 import type { LineResultInputX } from '../src/store/achievements.ts'
 import * as ops from '../src/store/profileOps.ts'
+import {
+  inLap,
+  lapOf,
+  lapProgress,
+  medalOf,
+  medalProgress,
+  MEDALS,
+  perfectDaysOf,
+  qualifiedMedal,
+  readiness,
+  roundBonusesLeft,
+  tierProgress,
+} from '../src/store/mastery.ts'
 import * as storage from '../src/store/storage.ts'
 import { ActivityClock, gapCredit } from '../src/store/activityClock.ts'
 import { migrateLineStats } from '../src/store/lineMigration.ts'
@@ -978,8 +991,9 @@ await test('redemption: double tap charges once; ids unique across players (revi
   assert.notEqual(m.redemption!.id, r1.redemption!.id)
 })
 
-await test('achievements: 28 defined, coins 20–200', () => {
-  assert.equal(ACHIEVEMENTS.length, 28)
+await test('achievements: 38 defined (28 + 10 practice-structure ones), coins 20–200, ids unique', () => {
+  assert.equal(ACHIEVEMENTS.length, 38)
+  assert.equal(new Set(ACHIEVEMENTS.map((a) => a.id)).size, ACHIEVEMENTS.length)
   assert.equal(Math.min(...ACHIEVEMENTS.map((a) => a.coins)), 20)
   assert.equal(Math.max(...ACHIEVEMENTS.map((a) => a.coins)), 200)
 })
@@ -1650,6 +1664,11 @@ await test('line migration runs when saved data / backups are loaded', () => {
   const ls = prof(v.data).lineStats
   assert.equal(ls[oldId], undefined)
   assert.equal(ls[newId].box, 3)
+  // lap progress follows renamed lines too (and a rename onto an id already done is merged)
+  const withLap = patchProfile(fresh(), 'david', { laps: { sicilian: { n: 2, done: [oldId, 'other', newId] } } })
+  const vl = storage.validateAppData(JSON.parse(JSON.stringify(withLap)), NOW)
+  assert.ok(vl.ok)
+  if (vl.ok) assert.deepEqual(prof(vl.data).laps, { sicilian: { n: 2, done: [newId, 'other'] } })
 })
 
 // ---------------------------------------------------------------------------
@@ -1767,6 +1786,694 @@ await test('time spent survives save/reload and backups, is validated, and is ke
   const p = ops.getProfile(r.data, 'david')!
   assert.equal(p.coins, 0)
   assert.equal(p.timeSpent!.totalMs, 25 * 60_000)
+})
+
+// ---------------------------------------------------------------------------
+// Practice structure: branch starts, review caps, medals, laps, rounds,
+// readiness, new achievements, storage (docs/practice-structure.md §7, group B)
+// ---------------------------------------------------------------------------
+
+/** A fake line with a practice tier (tiers normally come from lineTiers.classifyLines). */
+function tl(id: string, tier: LineTier | undefined, userMoveCount = 6, chapterId = 'nlQ9e14g', openingId = 'sicilian'): Line {
+  const l = fakeLine(id, userMoveCount, chapterId, openingId)
+  if (tier) l.tier = tier
+  return l
+}
+
+function chip(b: { label: string; coins: number }[], label: string): number | undefined {
+  return b.find((x) => x.label === label)?.coins
+}
+
+function achIds(defs: { id: string }[]): string[] {
+  return defs.map((a) => a.id)
+}
+
+const TODAY = localDateKey(NOW)
+const YESTERDAY = localDateKey(NOW - DAY)
+
+await test('branch-start pay (§4.2): 2 of 12 kid moves → base 4, Perfect 2, New 2, Combo/Punished capped at 2', () => {
+  const line = tl('br', 'deep', 12)
+  const p = prof(fresh())
+  const r = computeLineReward(input(line, { userMovesPlayed: 2, combo: 6, opponentBlunderPunished: true }), p, 5)
+  assert.equal(r.branchStart, true)
+  assert.equal(r.movesPaid, 2)
+  assert.deepEqual(
+    r.breakdown.map((b) => [b.label, b.coins]),
+    [['Line complete', 4], ['Perfect!', 2], ['New line', 2], ['Combo x6', 2], ['Punished a blunder', 2]],
+  )
+  assert.equal(r.coins, 12) // the "2-move Plan B stub" example of §4.2
+  // Remembered is capped too (seen before, due, perfect, not recent)
+  const seen = { ...p, lineStats: { br: stats({ completions: 2, box: 2 }) } }
+  const rr = computeLineReward(input(line, { userMovesPlayed: 3 }), seen, 5)
+  assert.deepEqual(rr.breakdown.map((b) => [b.label, b.coins]), [['Line complete', 5], ['Perfect!', 3], ['Remembered it!', 3]])
+  // 0 played still pays for 1; more than 15 is capped like a full line
+  assert.equal(chip(computeLineReward(input(line, { userMovesPlayed: 0 }), p, 5).breakdown, 'Line complete'), 3)
+  const long = tl('long', 'deep', 30)
+  assert.equal(chip(computeLineReward(input(long, { userMovesPlayed: 20 }), p, 5).breakdown, 'Line complete'), 17)
+  // The daily goal and streak are unchanged by branch starts
+  const goal = computeLineReward(input(line, { userMovesPlayed: 2 }), p, 1)
+  assert.equal(chip(goal.breakdown, 'Daily goal!'), 30)
+  assert.equal(chip(goal.breakdown, 'Streak started'), 5)
+})
+
+await test('branch-start pay: absent or >= userMoveCount is identical to a full run (regression); learn-like uses n', () => {
+  const line = tl('full', 'deep', 12)
+  const p = prof(fresh())
+  const plain = computeLineReward(input(line, { combo: 3 }), p, 5)
+  assert.equal(plain.branchStart, false)
+  assert.equal(plain.movesPaid, 12)
+  assert.deepEqual(
+    plain.breakdown.map((b) => [b.label, b.coins]),
+    [['Line complete', 17], ['Perfect!', 10], ['New line', 10], ['Combo x3', 5]],
+  )
+  assert.deepEqual(computeLineReward(input(line, { combo: 3, userMovesPlayed: 12 }), p, 5), plain)
+  assert.deepEqual(computeLineReward(input(line, { combo: 3, userMovesPlayed: 40 }), p, 5), plain)
+  assert.deepEqual(computeLineReward(input(line, { combo: 3, userMovesPlayed: NaN }), p, 5), plain)
+  // Learn-like threshold = arrow && hints >= max(1, n): 3 arrow hints on a 3-move branch start is learn-like…
+  const ll = computeLineReward(input(line, { userMovesPlayed: 3, usedArrowHint: true, hintsUsed: 3 }), p, 5)
+  assert.equal(ll.learnLike, true)
+  assert.deepEqual(ll.breakdown.map((b) => [b.label, b.coins]), [['Learned a line', 3]]) // ceil((2 + 3) / 2)
+  // …but not on the full 12-move line, and not with fewer hints than moves played
+  assert.equal(computeLineReward(input(line, { usedArrowHint: true, hintsUsed: 3 }), p, 5).learnLike, false)
+  assert.equal(computeLineReward(input(line, { userMovesPlayed: 3, usedArrowHint: true, hintsUsed: 2 }), p, 5).learnLike, false)
+  // Learn mode on a branch start: half of the n-based base
+  const lm = computeLineReward(input(line, { userMovesPlayed: 4, learnMode: true }), p, 5)
+  assert.deepEqual(lm.breakdown.map((b) => [b.label, b.coins]), [['Learned a line', 3]])
+  // Farmed repeats still pay a flat 2
+  const farmP = { ...p, lineStats: { full: stats({ lastPracticed: NOW - 10 * MIN, dueAt: NOW + DAY }) } }
+  const farm = computeLineReward(input(line, { userMovesPlayed: 2 }), farmP, 5)
+  assert.equal(farm.farmed, true)
+  assert.equal(farm.coins, 2)
+})
+
+await test('review cap per tier: a box 4→5 run is due in 7 days (main), 12 (key), 16 (deep / Plan B / unclassified)', () => {
+  const cases: Array<[LineTier | undefined, number]> = [['main', 7], ['key', 12], ['deep', 16], ['planb', 16], [undefined, 16]]
+  for (const [tier, days] of cases) {
+    const line = tl(`cap-${tier}`, tier)
+    const d = patchProfile(fresh(), 'david', { lineStats: { [line.id]: stats({ box: 4, perfects: 4, lastPracticed: NOW - 9 * DAY, dueAt: NOW - DAY }) } })
+    const s = prof(ops.applyLineResult(d, 'david', input(line), null).data).lineStats[line.id]
+    assert.equal(s.box, 5, String(tier))
+    assert.equal(s.dueAt, NOW + days * DAY, String(tier))
+  }
+  // nextLineStats passes the cap through; no cap = today's rule
+  const prev = stats({ box: 4, dueAt: NOW - DAY })
+  const ok = { mistakes: 0, hintsUsed: 0, usedArrowHint: false, learnMode: false }
+  assert.equal(nextLineStats(prev, ok, NOW, 7).dueAt, NOW + 7 * DAY)
+  assert.equal(nextLineStats(prev, ok, NOW).dueAt, NOW + 16 * DAY)
+  // A main line at box 2 is unaffected (2 days < 7)
+  const main = tl('cap-low', 'main')
+  const d = patchProfile(fresh(), 'david', { lineStats: { [main.id]: stats({ box: 1, dueAt: NOW - DAY }) } })
+  assert.equal(prof(ops.applyLineResult(d, 'david', input(main), null).data).lineStats[main.id].dueAt, NOW + 2 * DAY)
+})
+
+await test('perfectDays: +1 per local day with a perfect run; legacy read min(perfects, box); kept through the stats rebuild', () => {
+  const line = tl('pd', 'key')
+  const at = (d: AppData, now: number, o: Partial<LineResultInputX> = {}) => ops.applyLineResult(d, 'david', input(line, { now, ...o }), null).data
+  const st = (d: AppData) => prof(d).lineStats[line.id]
+  let d = at(fresh(), NOW)
+  assert.equal(st(d).perfectDays, 1)
+  assert.equal(st(d).lastPerfectDay, TODAY)
+  d = at(d, NOW + 10 * MIN) // same day (a quick repeat): no new day
+  assert.equal(st(d).perfectDays, 1)
+  d = at(d, NOW + 2 * HOUR, { mistakes: 1 }) // not perfect: the fields are carried forward unchanged
+  assert.equal(st(d).perfectDays, 1)
+  assert.equal(st(d).lastPerfectDay, TODAY)
+  d = at(d, NOW + DAY)
+  assert.equal(st(d).perfectDays, 2)
+  assert.equal(st(d).lastPerfectDay, localDateKey(NOW + DAY))
+  d = at(d, NOW + 2 * DAY, { learnMode: true }) // learn mode is never a perfect run
+  assert.equal(st(d).perfectDays, 2)
+  assert.equal(st(d).perfects, 2 + 1) // NOW, NOW+10min, NOW+1d
+  // Legacy stats (no field): min(perfects, box)
+  assert.equal(perfectDaysOf(stats({ perfects: 7, box: 3 })), 3)
+  assert.equal(perfectDaysOf(stats({ perfects: 1, box: 4 })), 1)
+  assert.equal(perfectDaysOf(stats({ perfects: 7, box: 3, perfectDays: 5 })), 5)
+  assert.equal(perfectDaysOf(undefined), 0)
+  // The first perfect run on an old line writes the real value: legacy + 1
+  const old = patchProfile(fresh(), 'david', { lineStats: { pd: stats({ perfects: 7, box: 3 }) } })
+  assert.equal(st(at(old, NOW)).perfectDays, 4)
+  // A failed first run on an old line keeps the estimate from before the box dropped
+  const oldFail = at(old, NOW, { mistakes: 3 })
+  assert.equal(st(oldFail).box, 0)
+  assert.equal(st(oldFail).perfectDays, 3)
+  assert.equal(st(at(oldFail, NOW + DAY)).perfectDays, 4)
+  // Clock moved back a little (last perfect day = tomorrow): no extra day; far in the future = wrong clock, replaced
+  const ahead = patchProfile(fresh(), 'david', { lineStats: { pd: stats({ perfects: 3, perfectDays: 3, lastPerfectDay: localDateKey(NOW + DAY) }) } })
+  assert.equal(st(at(ahead, NOW)).perfectDays, 3)
+  assert.equal(st(at(ahead, NOW)).lastPerfectDay, localDateKey(NOW + DAY))
+  const far = patchProfile(fresh(), 'david', { lineStats: { pd: stats({ perfects: 3, perfectDays: 3, lastPerfectDay: '2030-01-01' }) } })
+  assert.equal(st(at(far, NOW)).perfectDays, 4)
+  assert.equal(st(at(far, NOW)).lastPerfectDay, TODAY)
+})
+
+await test('medals: the 5th perfect run of a main line pays bronze (+10 chip); never twice; kept after a failed run', () => {
+  const line = tl('m1', 'main')
+  const d0 = patchProfile(fresh(), 'david', {
+    lineStats: { m1: stats({ perfects: 4, perfectDays: 1, lastPerfectDay: YESTERDAY, box: 1, lastPracticed: NOW - DAY, dueAt: NOW - HOUR }) },
+  })
+  const out = ops.applyLineResult(d0, 'david', input(line), null)
+  assert.deepEqual(out.reward.medal, { level: 1, coins: 10 })
+  assert.equal(chip(out.reward.breakdown, 'Bronze medal'), 10)
+  assert.equal(out.reward.breakdown.find((b) => b.label === 'Bronze medal')!.emoji, '🥉')
+  assert.equal(sum(out.reward.breakdown), out.reward.coins)
+  assert.equal(prof(out.data).coins, out.reward.coins)
+  assert.equal(prof(out.data).daily.coinsEarned, out.reward.coins)
+  assert.ok(prof(out.data).history.some((h) => h.reason.startsWith('🥉 Bronze medal') && h.delta === 10))
+  const s1 = prof(out.data).lineStats.m1
+  assert.equal(s1.medal, 1)
+  assert.equal(s1.perfects, 5)
+  assert.equal(s1.perfectDays, 2)
+  // failed run: box drops, the medal stays, nothing paid
+  const failed = ops.applyLineResult(out.data, 'david', input(line, { now: NOW + DAY, mistakes: 3 }), null)
+  assert.equal(failed.reward.medal, undefined)
+  assert.equal(prof(failed.data).lineStats.m1.box, 0)
+  assert.equal(prof(failed.data).lineStats.m1.medal, 1)
+  // the next perfect run doesn't pay bronze again
+  const again = ops.applyLineResult(failed.data, 'david', input(line, { now: NOW + 2 * DAY }), null)
+  assert.equal(again.reward.medal, undefined)
+  assert.equal(chip(again.reward.breakdown, 'Bronze medal'), undefined)
+  assert.equal(prof(again.data).lineStats.m1.medal, 1)
+  // medalProgress: stored level and what the next one needs
+  const mp = medalProgress(prof(again.data).lineStats.m1)
+  assert.equal(mp.level, 1)
+  assert.equal(mp.next!.name, 'Silver')
+  assert.deepEqual([mp.perfects, mp.days], [6, 3])
+  assert.equal(medalProgress(undefined).next!.level, 1)
+  assert.equal(medalProgress(stats({ medal: 3 })).next, null)
+  assert.deepEqual(MEDALS.map((m) => [m.perfects, m.days, m.box, m.coins]), [[5, 1, 0, 10], [15, 4, 0, 25], [30, 8, 3, 50]])
+})
+
+await test('medals: a jump from none to silver pays 35; gold needs box >= 3 and 8 days; only main lines', () => {
+  const run = (tier: LineTier | undefined, s: LineStats) => {
+    const line = tl('mx', tier)
+    return ops.applyLineResult(patchProfile(fresh(), 'david', { lineStats: { mx: s } }), 'david', input(line), null)
+  }
+  const jump = run('main', stats({ perfects: 14, perfectDays: 3, lastPerfectDay: YESTERDAY, box: 2 }))
+  assert.deepEqual(jump.reward.medal, { level: 2, coins: 35 })
+  assert.equal(chip(jump.reward.breakdown, 'Bronze medal'), 10)
+  assert.equal(chip(jump.reward.breakdown, 'Silver medal'), 25)
+  assert.equal(prof(jump.data).lineStats.mx.medal, 2)
+  // gold: 30 runs on 8 days and box 3
+  const gold = run('main', stats({ perfects: 29, perfectDays: 7, lastPerfectDay: YESTERDAY, box: 2, medal: 2 }))
+  assert.deepEqual(gold.reward.medal, { level: 3, coins: 50 })
+  assert.equal(chip(gold.reward.breakdown, 'Gold medal'), 50)
+  // box too low (1 → 2): silver at most
+  const lowBox = run('main', stats({ perfects: 40, perfectDays: 10, lastPerfectDay: YESTERDAY, box: 1, medal: 2 }))
+  assert.equal(lowBox.reward.medal, undefined)
+  assert.equal(prof(lowBox.data).lineStats.mx.medal, 2)
+  // 7 days (already counted today): no gold
+  const fewDays = run('main', stats({ perfects: 40, perfectDays: 7, lastPerfectDay: TODAY, box: 4, medal: 2 }))
+  assert.equal(fewDays.reward.medal, undefined)
+  // old stats with many reps: bronze/silver on the next run (legacy days = min(perfects, box) + 1)
+  const legacy = run('main', stats({ perfects: 20, box: 3 }))
+  assert.deepEqual(legacy.reward.medal, { level: 2, coins: 35 })
+  // key / deep / Plan B / unclassified lines never get a medal
+  for (const t of ['key', 'deep', 'planb', undefined] as const) {
+    const o = run(t, stats({ perfects: 40, perfectDays: 10, lastPerfectDay: YESTERDAY, box: 4 }))
+    assert.equal(o.reward.medal, undefined, String(t))
+    assert.equal(prof(o.data).lineStats.mx.medal, undefined, String(t))
+  }
+  assert.equal(qualifiedMedal(stats({ perfects: 40, perfectDays: 10, box: 2 })), 2)
+  assert.equal(qualifiedMedal(stats({ perfects: 40, perfectDays: 10, box: 3 })), 3)
+  assert.equal(qualifiedMedal(stats({ perfects: 4, perfectDays: 4, box: 5 })), 0)
+  assert.equal(medalOf(stats({ medal: 4 as 3 })), 0)
+})
+
+await test('medals: a quick (farmed) perfect repeat still counts and pays 2 + medal', () => {
+  const line = tl('mf', 'main')
+  const d = patchProfile(fresh(), 'david', {
+    lineStats: { mf: stats({ perfects: 4, perfectDays: 1, lastPerfectDay: TODAY, box: 2, lastPracticed: NOW - 10 * MIN, dueAt: NOW + DAY }) },
+  })
+  const out = ops.applyLineResult(d, 'david', input(line), null)
+  assert.equal(out.farmed, true)
+  assert.deepEqual(out.reward.breakdown.map((b) => [b.label, b.coins]), [['Practice makes perfect', 2], ['Bronze medal', 10]])
+  assert.equal(out.reward.coins, 12)
+  assert.equal(prof(out.data).lineStats.mf.perfects, 5)
+  assert.equal(prof(out.data).totals.lines, 0) // farmed runs still count for no totals
+})
+
+await test('laps: 2★ adds to the lap, 1★ / learn mode do not, quick repeats do; the last line rolls the lap over (+2 per line)', () => {
+  const lines = [tl('L1', 'main'), tl('L2', 'key'), tl('L3', 'deep'), tl('L4', 'planb')]
+  const rep = fakeRep('sicilian', lines)
+  const play = (d: AppData, l: Line, now: number, o: Partial<LineResultInputX> = {}) => ops.applyLineResult(d, 'david', input(l, { now, ...o }), rep)
+  let d = fresh()
+  let o = play(d, lines[0], NOW, { mistakes: 2 }) // 1 star
+  assert.equal(o.reward.stars, 1)
+  assert.equal(o.reward.lap, undefined)
+  d = o.data
+  o = play(d, lines[0], NOW + MIN, { learnMode: true })
+  assert.equal(o.reward.lap, undefined)
+  d = o.data
+  assert.deepEqual(lapOf(prof(d), 'sicilian'), { n: 1, done: [] })
+  o = play(d, lines[0], NOW + 2 * MIN, { mistakes: 1 }) // 2 stars
+  assert.equal(o.reward.stars, 2)
+  assert.deepEqual(o.reward.lap, { openingId: 'sicilian', n: 1, done: 1, total: 4, completed: false, coins: 0 })
+  d = o.data
+  o = play(d, lines[0], NOW + 3 * MIN) // quick repeat: farmed, still counts (but only once per lap)
+  assert.equal(o.farmed, true)
+  assert.deepEqual(o.reward.lap, { openingId: 'sicilian', n: 1, done: 1, total: 4, completed: false, coins: 0 })
+  d = o.data
+  d = play(d, lines[1], NOW + 4 * MIN).data
+  d = play(d, lines[2], NOW + 5 * MIN).data
+  assert.deepEqual(lapOf(prof(d), 'sicilian'), { n: 1, done: ['L1', 'L2', 'L3'] })
+  const coins0 = prof(d).coins
+  o = play(d, lines[3], NOW + 6 * MIN)
+  assert.deepEqual(o.reward.lap, { openingId: 'sicilian', n: 1, done: 4, total: 4, completed: true, coins: 8 })
+  assert.equal(chip(o.reward.breakdown, 'Lap 1 complete'), 8)
+  assert.equal(o.reward.breakdown.find((b) => b.label === 'Lap 1 complete')!.emoji, '🌳')
+  assert.ok(achIds(o.reward.newAchievements).includes('lap-1'))
+  assert.equal(sum(o.reward.breakdown), o.reward.coins)
+  d = o.data
+  assert.equal(prof(d).coins, coins0 + o.reward.coins)
+  assert.equal(prof(d).totals.laps, 1)
+  assert.deepEqual(lapOf(prof(d), 'sicilian'), { n: 2, done: [] })
+  assert.ok(prof(d).history.some((h) => h.reason === '🌳 Lap 1 complete · Sicilian Defence' && h.delta === 8))
+  // the next counted completion starts lap 2
+  o = play(d, lines[2], NOW + DAY)
+  assert.deepEqual(o.reward.lap, { openingId: 'sicilian', n: 2, done: 1, total: 4, completed: false, coins: 0 })
+  // laps are per opening; lapProgress ignores ids outside the set
+  assert.deepEqual(lapOf(prof(o.data), 'london'), { n: 1, done: [] })
+  const lp = lapProgress(prof(o.data), 'sicilian', ['L1', 'L2'])
+  assert.deepEqual([lp.n, lp.done, lp.total, [...lp.doneIds]], [2, 0, 2, []])
+  assert.deepEqual(lapProgress(prof(o.data), 'sicilian', ['L3', 'L4']).done, 1)
+  // inLap
+  assert.equal(inLap(lines[3], true), true)
+  assert.equal(inLap(lines[3], false), false)
+  assert.equal(inLap(lines[0], false), true)
+  assert.equal(inLap(tl('x', undefined), false), true)
+})
+
+await test('laps: Plan B off leaves Plan B out; stale ids are ignored; without the repertoire there is no rollover', () => {
+  const lines = [tl('L1', 'main'), tl('L2', 'key'), tl('L3', 'deep'), tl('L4', 'planb')]
+  const rep = fakeRep('sicilian', lines)
+  let d = ops.setIncludePlanB(fresh(), false).data
+  assert.equal(d.parent.includePlanB, false)
+  // a Plan B completion doesn't count while Plan B is off
+  const pb = ops.applyLineResult(d, 'david', input(lines[3]), rep)
+  assert.equal(pb.reward.lap, undefined)
+  // stale ids ('gone', and Plan B's L4) don't count toward the total
+  d = patchProfile(d, 'david', { laps: { sicilian: { n: 3, done: ['gone', 'L4', 'L1', 'L2'] } } })
+  const o = ops.applyLineResult(d, 'david', input(lines[2]), rep)
+  assert.deepEqual(o.reward.lap, { openingId: 'sicilian', n: 3, done: 3, total: 3, completed: true, coins: 6 })
+  assert.deepEqual(lapOf(prof(o.data), 'sicilian'), { n: 4, done: [] })
+  // lap 4 reached (3 laps finished) → Evergreen; first lap finished → Tree Climber
+  assert.ok(achIds(o.reward.newAchievements).includes('lap-3'))
+  assert.ok(achIds(o.reward.newAchievements).includes('lap-1'))
+  // Plan B back on: the total includes it again
+  const on = ops.setIncludePlanB(o.data, true).data
+  assert.equal(ops.applyLineResult(on, 'david', input(lines[3], { now: NOW + DAY }), rep).reward.lap!.total, 4)
+  // without the repertoire: recorded, never rolled over (total unknown = 0)
+  let nr = fresh()
+  for (const [i, l] of lines.entries()) {
+    const r = ops.applyLineResult(nr, 'david', input(l, { now: NOW + i * MIN }), null)
+    assert.equal(r.reward.lap!.completed, false)
+    assert.equal(r.reward.lap!.total, 0)
+    nr = r.data
+  }
+  assert.deepEqual(lapOf(prof(nr), 'sicilian'), { n: 1, done: ['L1', 'L2', 'L3', 'L4'] })
+  assert.equal(prof(nr).totals.laps, undefined)
+  // a repertoire of another opening is treated like no repertoire
+  const other = ops.applyLineResult(fresh(), 'david', input(lines[0]), fakeRep('london', []))
+  assert.equal(other.reward.lap!.total, 0)
+  // a lap that is already complete (e.g. Plan B switched off) rolls over on the next counted completion
+  const full = patchProfile(ops.setIncludePlanB(fresh(), false).data, 'david', { laps: { sicilian: { n: 1, done: ['L1', 'L2', 'L3'] } } })
+  const roll = ops.applyLineResult(full, 'david', input(lines[0]), rep)
+  assert.equal(roll.reward.lap!.completed, true)
+  assert.equal(roll.reward.lap!.coins, 6)
+})
+
+await test('applyMainRound: 2 per line + 10 when clean; 3 bonuses a day; best time only for clean, faster rounds', () => {
+  const mains = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6'].map((id) => tl(id, 'main'))
+  const rep = fakeRep('sicilian', [...mains, tl('K1', 'key')])
+  const ids = mains.map((l) => l.id)
+  const round = (d: AppData, roundId: number, clean: boolean, ms: number, now = NOW, lineIds = ids, openingId = 'sicilian', r: Repertoire | null = rep) =>
+    ops.applyMainRound(d, 'david', { openingId, roundId, lineIds, clean, ms, now }, r)
+  // a re-queued line counts once; a non-main id is ignored when the repertoire is known
+  const r1 = round(fresh(), 1, false, 300_000, NOW, [...ids, 'M2', 'K1'])
+  assert.equal(r1.ok, true)
+  assert.equal(r1.bonusPaid, true)
+  assert.deepEqual(r1.breakdown.map((b) => [b.label, b.coins]), [['Round bonus · 6 lines', 12], ['🏅 Warmed Up', 20]])
+  assert.equal(r1.coins, 32)
+  assert.deepEqual(achIds(r1.newAchievements), ['round-1'])
+  assert.equal(r1.roundsLeftToday, 2)
+  assert.equal(r1.newBest, false) // not clean
+  assert.equal(r1.bestMs, null)
+  let p = prof(r1.data)
+  assert.equal(p.coins, 32)
+  assert.equal(p.daily.coinsEarned, 32)
+  assert.equal((p.daily as DailyStateX).roundsRewarded, 1)
+  assert.deepEqual([p.totals.rounds, p.totals.cleanRounds], [1, 0])
+  assert.ok(p.history.some((h) => h.reason === '⭐ Main-line round · Sicilian Defence' && h.delta === 12))
+  // clean round: +10, Clean Sweep, first best time
+  const r2 = round(r1.data, 2, true, 250_000, NOW + 10 * MIN)
+  assert.deepEqual(r2.breakdown.map((b) => [b.label, b.coins]), [['Round bonus · 6 lines', 12], ['Clean sweep', 10], ['🏅 Clean Sweep', 50]])
+  assert.equal(r2.coins, 72)
+  assert.deepEqual([r2.newBest, r2.bestMs], [true, 250_000])
+  // slower clean round: no new best
+  const r3 = round(r2.data, 3, true, 260_000, NOW + 20 * MIN)
+  assert.equal(r3.coins, 22)
+  assert.deepEqual([r3.newBest, r3.bestMs, r3.roundsLeftToday], [false, 250_000, 0])
+  // 4th round today: no bonus, still counted; a faster clean round still sets the best
+  const r4 = round(r3.data, 4, true, 200_000, NOW + 30 * MIN)
+  assert.equal(r4.ok, true)
+  assert.deepEqual([r4.bonusPaid, r4.coins, r4.breakdown.length, r4.roundsLeftToday], [false, 0, 0, 0])
+  assert.deepEqual([r4.newBest, r4.bestMs], [true, 200_000])
+  // a faster round that wasn't clean doesn't count as a best
+  const r5 = round(r4.data, 5, false, 100_000, NOW + 40 * MIN)
+  assert.deepEqual([r5.newBest, r5.bestMs], [false, 200_000])
+  p = prof(r5.data)
+  assert.deepEqual([p.totals.rounds, p.totals.cleanRounds], [5, 3])
+  assert.deepEqual(p.mainRoundBest, { sicilian: 200_000 })
+  assert.equal(p.coins, 32 + 72 + 22)
+  assert.equal(roundBonusesLeft(p, NOW + 41 * MIN), 0)
+  assert.equal(roundBonusesLeft(p, NOW + DAY), 3)
+  // the daily limit is across openings: a London round today pays nothing either
+  const lon = round(r5.data, 6, true, 120_000, NOW + 50 * MIN, ['A', 'B', 'C', 'D'], 'london', null)
+  assert.deepEqual([lon.bonusPaid, lon.coins, lon.newBest], [false, 0, true])
+  // the next day pays again (London: 4 lines → 8, clean 18)
+  const next = round(lon.data, 7, true, 110_000, NOW + DAY, ['A', 'B', 'C', 'D'], 'london', null)
+  assert.deepEqual([next.bonusPaid, next.coins, next.roundsLeftToday], [true, 18, 2])
+  // line results keep the round totals (totals are spread, not rebuilt)
+  const after = ops.applyLineResult(next.data, 'david', input(tl('x', 'deep'), { now: NOW + DAY + MIN }), null)
+  assert.deepEqual([prof(after.data).totals.rounds, prof(after.data).totals.cleanRounds], [7, 5])
+  // invalid input changes nothing
+  const d0 = fresh()
+  for (const bad of [
+    ops.applyMainRound(d0, 'nobody', { openingId: 'sicilian', roundId: 1, lineIds: ids, clean: true, ms: 1, now: NOW }, rep),
+    ops.applyMainRound(d0, 'david', { openingId: 'sicilian', roundId: 1, lineIds: [], clean: true, ms: 1, now: NOW }, rep),
+    ops.applyMainRound(d0, 'david', { openingId: 'sicilian', roundId: 1, lineIds: ['K1'], clean: true, ms: 1, now: NOW }, rep),
+    ops.applyMainRound(d0, 'david', { openingId: 'sicilian', roundId: 1, lineIds: ids, clean: true, ms: 1, now: NaN }, rep),
+    ops.applyMainRound(d0, 'david', { openingId: '', roundId: 1, lineIds: ids, clean: true, ms: 1, now: NOW }, rep),
+  ]) {
+    assert.equal(bad.ok, false)
+    assert.equal(bad.data, d0)
+    assert.equal(bad.coins, 0)
+  }
+  // the input is never mutated
+  const frozen = deepFreeze(fresh())
+  assert.doesNotThrow(() => round(frozen, 9, true, 1000))
+})
+
+await test('appStore: applyMainRound dedupes on profile|opening|roundId; setIncludePlanB', async () => {
+  const mem = new MemStorage()
+  storage.setStorageBackend(mem)
+  const { actions, getActiveProfile, getAppData } = await freshAppStore('main-round')
+  actions.selectProfile('david')
+  const before = getActiveProfile()!.totals.rounds ?? 0
+  const inp = { openingId: 'london', roundId: 424242, lineIds: ['a', 'b'], clean: true, ms: 90_000, now: Date.now() }
+  const a = actions.applyMainRound(inp, null)
+  const b = actions.applyMainRound({ ...inp, now: Date.now() + 5 }, null)
+  assert.equal(a.ok, true)
+  assert.equal(b, a)
+  assert.equal(getActiveProfile()!.totals.rounds, before + 1)
+  assert.equal(actions.applyMainRound({ ...inp, roundId: 424243 }, null).ok, true)
+  assert.equal(getActiveProfile()!.totals.rounds, before + 2)
+  assert.equal(actions.applyMainRound({ ...inp, openingId: 'sicilian' }, null).ok, true)
+  assert.equal(getActiveProfile()!.totals.rounds, before + 3)
+  // another player with the same roundId is a different round
+  actions.selectProfile('minka')
+  const m = actions.applyMainRound(inp, null)
+  assert.equal(m.ok, true)
+  assert.notEqual(m, a)
+  // Plan B toggle (Parent zone)
+  assert.equal(actions.setIncludePlanB(false).ok, true)
+  assert.equal(getAppData().parent.includePlanB, false)
+  assert.equal(actions.setIncludePlanB(true).ok, true)
+  assert.equal(getAppData().parent.includePlanB, true)
+  assert.equal(actions.setIncludePlanB('yes' as unknown as boolean).ok, false)
+  actions.signOut()
+  assert.equal(actions.applyMainRound({ ...inp, roundId: 1 }, null).ok, false)
+  storage.setStorageBackend(undefined)
+})
+
+await test('achievements: gold-* and ready-* need the repertoire; round-1, clean-round, lap-1, lap-3', () => {
+  const sic = [tl('S-main', 'main'), tl('S-key', 'key'), tl('S-deep', 'deep'), tl('S-pb', 'planb')]
+  const rep = fakeRep('sicilian', sic)
+  const base = prof(fresh())
+  const p = { ...base, lineStats: { 'S-main': stats({ medal: 3, box: 3 }), 'S-key': stats({ box: 2 }) } }
+  const got = (pp: Profile, ctx: Parameters<typeof checkAchievements>[1]) => achIds(checkAchievements(pp, ctx))
+  assert.ok(got(p, { now: NOW, rep }).includes('gold-sicilian'))
+  assert.ok(!got(p, { now: NOW, rep }).includes('ready-sicilian')) // a key reply isn't mastered yet
+  const ready = { ...p, lineStats: { ...p.lineStats, 'S-key': stats({ box: 3 }) } }
+  assert.ok(got(ready, { now: NOW, rep }).includes('ready-sicilian'))
+  assert.ok(got(ready, { now: NOW, reps: [rep] }).includes('ready-sicilian'))
+  for (const id of ['gold-london', 'gold-vs-d4', 'ready-london', 'ready-vs-d4']) assert.ok(!got(ready, { now: NOW, rep }).includes(id), id)
+  // no repertoire → none of them
+  const noRep = got(ready, { now: NOW })
+  assert.ok(!noRep.some((id) => id.startsWith('gold-') || id.startsWith('ready-')))
+  // a silver main line is not gold; an opening without main lines never qualifies
+  const silver = { ...ready, lineStats: { ...ready.lineStats, 'S-main': stats({ medal: 2, box: 5 }) } }
+  assert.ok(!got(silver, { now: NOW, rep }).includes('gold-sicilian'))
+  assert.ok(!got(ready, { now: NOW, rep: fakeRep('sicilian', [tl('S-key', 'key')]) }).includes('gold-sicilian'))
+  // London: every main line gold, no key lines → ready from the medals alone
+  const lonRep = fakeRep('london', [tl('Lm1', 'main', 6, 'Ytr9pGwj', 'london'), tl('Lm2', 'main', 6, 'Lq0E0yS0', 'london')])
+  const lon = { ...base, lineStats: { Lm1: stats({ medal: 3 }), Lm2: stats({ medal: 3 }) } }
+  assert.ok(got(lon, { now: NOW, rep: lonRep }).includes('gold-london'))
+  assert.ok(got(lon, { now: NOW, rep: lonRep }).includes('ready-london'))
+  // totals- and lap-based ones
+  assert.ok(got({ ...base, totals: { ...base.totals, rounds: 1 } }, { now: NOW }).includes('round-1'))
+  assert.ok(!got({ ...base, totals: { ...base.totals, rounds: 1 } }, { now: NOW }).includes('clean-round'))
+  assert.ok(got({ ...base, totals: { ...base.totals, cleanRounds: 1 } }, { now: NOW }).includes('clean-round'))
+  assert.ok(got({ ...base, totals: { ...base.totals, laps: 1 } }, { now: NOW }).includes('lap-1'))
+  assert.ok(!got({ ...base, laps: { london: { n: 3, done: [] } } }, { now: NOW }).includes('lap-3'))
+  assert.ok(got({ ...base, laps: { london: { n: 4, done: [] } } }, { now: NOW }).includes('lap-3'))
+  assert.deepEqual(got(base, { now: NOW }), [])
+  // definitions
+  const def = (id: string) => ACHIEVEMENTS.find((a) => a.id === id)!
+  assert.deepEqual([def('round-1').name, def('round-1').emoji, def('round-1').coins], ['Warmed Up', '🏃', 20])
+  assert.deepEqual([def('clean-round').name, def('clean-round').emoji, def('clean-round').coins], ['Clean Sweep', '🧹', 50])
+  assert.deepEqual(['sicilian', 'london', 'vs-d4'].map((o) => def(`gold-${o}`).name), ['Golden Dragon', 'Golden Tower', 'Golden Gate'])
+  assert.ok(['sicilian', 'london', 'vs-d4'].every((o) => def(`gold-${o}`).coins === 100 && def(`gold-${o}`).emoji === '🥇'))
+  assert.ok(['sicilian', 'london', 'vs-d4'].every((o) => def(`ready-${o}`).coins === 200 && def(`ready-${o}`).name === 'Tournament Ready'))
+  assert.ok(def('ready-london').description.includes('London System'))
+  assert.deepEqual([def('lap-1').name, def('lap-1').emoji, def('lap-1').coins], ['Tree Climber', '🌳', 75])
+  assert.deepEqual([def('lap-3').name, def('lap-3').emoji, def('lap-3').coins], ['Evergreen', '🌲', 150])
+  // applyMainRound runs the check with the repertoire
+  const goldRound = ops.applyMainRound(patchProfile(fresh(), 'david', { lineStats: p.lineStats }), 'david', {
+    openingId: 'sicilian', roundId: 1, lineIds: ['S-main'], clean: true, ms: 60_000, now: NOW,
+  }, rep)
+  assert.ok(achIds(goldRound.newAchievements).includes('gold-sicilian'))
+})
+
+await test('readiness: medals + key boxes, floored, at least 1% above 0, 100 = ready', () => {
+  const lines = [tl('m1', 'main'), tl('m2', 'main'), tl('k1', 'key'), tl('k2', 'key'), tl('k3', 'key'), tl('d1', 'deep'), tl('p1', 'planb')]
+  const all = readiness(lines, {
+    m1: stats({ medal: 3 }), m2: stats({ medal: 3 }), k1: stats({ box: 3 }), k2: stats({ box: 5 }), k3: stats({ box: 4 }),
+  })
+  assert.deepEqual(all, { percent: 100, ready: true, mains: 2, mainsByMedal: [2, 2, 2], keys: 3, keysMastered: 3 })
+  // (1/6 + 1/9) / 2 = 13.9% → 13
+  const part = readiness(lines, { m1: stats({ medal: 1 }), k1: stats({ box: 1 }), d1: stats({ box: 5 }), p1: stats({ box: 5 }) })
+  assert.deepEqual(part, { percent: 13, ready: false, mains: 2, mainsByMedal: [1, 0, 0], keys: 3, keysMastered: 0 })
+  // all gold but one key at box 2: (1 + 8/9) / 2 = 94.4% → 94, not ready
+  const almost = readiness(lines, { m1: stats({ medal: 3 }), m2: stats({ medal: 3 }), k1: stats({ box: 3 }), k2: stats({ box: 3 }), k3: stats({ box: 2 }) })
+  assert.deepEqual([almost.percent, almost.ready], [94, false])
+  // exact arithmetic: 1 main (bronze) + 50 keys with 37 box points = 29% exactly (naive floats give 28)
+  const keys50 = Array.from({ length: 50 }, (_, i) => tl(`kk${i}`, 'key'))
+  const st50: Record<string, LineStats> = { mm: stats({ medal: 1 }) }
+  for (let i = 0; i < 12; i++) st50[`kk${i}`] = stats({ box: 3 })
+  st50.kk12 = stats({ box: 1 })
+  assert.equal(readiness([tl('mm', 'main'), ...keys50], st50).percent, 29)
+  // tiny progress shows 1%
+  const many = Array.from({ length: 100 }, (_, i) => tl(`k${i}`, 'key'))
+  assert.equal(readiness([tl('m', 'main'), ...many], { k0: stats({ box: 1 }) }).percent, 1)
+  // main lines only: medals 3 + 1 of 6 → 66%
+  assert.equal(readiness([tl('a', 'main'), tl('b', 'main')], { a: stats({ medal: 3 }), b: stats({ medal: 1 }) }).percent, 66)
+  assert.equal(readiness([tl('a', 'main')], { a: stats({ medal: 3 }) }).ready, true)
+  // nothing yet / no lines
+  assert.deepEqual(readiness(lines, {}), { percent: 0, ready: false, mains: 2, mainsByMedal: [0, 0, 0], keys: 3, keysMastered: 0 })
+  assert.deepEqual(readiness([], {}).ready, false)
+})
+
+await test('tierProgress: total / seen / mastered / due per tier (unclassified counts as deep)', () => {
+  const lines = [tl('m', 'main'), tl('k1', 'key'), tl('k2', 'key'), tl('d', 'deep'), tl('u', undefined), tl('p', 'planb')]
+  const tp = tierProgress(
+    lines,
+    { m: stats({ box: 3, dueAt: NOW + 5 * DAY }), k1: stats({ box: 1, dueAt: NOW - HOUR }), u: stats({ box: 4, dueAt: NOW + 2 * HOUR }) },
+    NOW,
+  )
+  assert.deepEqual(tp.main, { total: 1, seen: 1, mastered: 1, due: 0 })
+  assert.deepEqual(tp.key, { total: 2, seen: 1, mastered: 0, due: 1 })
+  assert.deepEqual(tp.deep, { total: 2, seen: 1, mastered: 1, due: 1 }) // due later today counts
+  assert.deepEqual(tp.planb, { total: 1, seen: 0, mastered: 0, due: 0 })
+})
+
+await test('storage: every new field survives validation and a backup round trip', () => {
+  const mem = new MemStorage()
+  storage.setStorageBackend(mem)
+  // Real "now": an app store registered by an earlier test imports the backup
+  // live, which rolls the daily state over to today.
+  const now = Date.now()
+  const base = fresh(now)
+  let d = patchProfile(base, 'david', {
+    lineStats: { a: stats({ perfects: 9, perfectDays: 4, lastPerfectDay: '2026-10-13', medal: 1 }), b: stats({ perfects: 0, perfectDays: 0 }) },
+    laps: { sicilian: { n: 2, done: ['a', 'b'] }, london: { n: 1, done: [] } },
+    mainRoundBest: { sicilian: 251_234, london: 99_000.5 },
+    totals: { ...prof(base).totals, rounds: 3, cleanRounds: 1, laps: 1 },
+    daily: { ...prof(base).daily, roundsRewarded: 2 } as DailyStateX,
+  })
+  d = ops.setIncludePlanB(d, false).data
+  const v = storage.validateAppData(JSON.parse(JSON.stringify(d)), now)
+  assert.ok(v.ok)
+  if (v.ok) assert.deepEqual(v.data, d)
+  const parsed = storage.parseBackup(storage.exportBackup(d, now), now)
+  assert.ok(parsed.ok)
+  if (parsed.ok) assert.deepEqual(parsed.data, d)
+  assert.deepEqual(storage.importBackup(storage.exportBackup(d, now)), { ok: true })
+  storage.flushSave()
+  const back = storage.loadAppData(now)
+  assert.deepEqual(back.profiles, d.profiles)
+  assert.equal(back.parent.includePlanB, false)
+  // and through real play: medal, laps, round data all reload
+  let played = ops.applyMainRound(fresh(), 'david', { openingId: 'sicilian', roundId: 1, lineIds: ['x'], clean: true, ms: 5000, now: NOW }, null).data
+  played = ops.applyLineResult(
+    patchProfile(played, 'david', { lineStats: { mm: stats({ perfects: 4, perfectDays: 1, lastPerfectDay: YESTERDAY }) } }),
+    'david',
+    input(tl('mm', 'main')),
+    null,
+  ).data
+  const re = storage.validateAppData(JSON.parse(JSON.stringify(played)), NOW)
+  assert.ok(re.ok)
+  if (re.ok) assert.deepEqual(re.data, played)
+  storage.setStorageBackend(undefined)
+})
+
+await test('storage: invalid new values are dropped; a save from before this change loads unchanged', () => {
+  const base = fresh()
+  const raw = JSON.parse(JSON.stringify(base))
+  const rp = raw.profiles[0]
+  rp.lineStats = {
+    a: { ...stats({ perfects: 9 }), perfectDays: 50, lastPerfectDay: 'yesterday', medal: 4 },
+    b: { ...stats({}), perfectDays: -1, medal: '2' },
+    c: { ...stats({ perfects: 3 }), perfectDays: 2.7, medal: 3, lastPerfectDay: '2026-10-01' },
+  }
+  rp.laps = JSON.parse(
+    '{"sicilian":{"n":0,"done":["a"]},"london":{"n":"x","done":[]},"vs-d4":{"n":2.5,"done":["a","a",7,"b"]},"__proto__":{"n":2,"done":[]},"x":5}',
+  )
+  rp.mainRoundBest = { sicilian: -5, london: 0, 'vs-d4': 'fast', other: 1234 }
+  rp.totals = { ...rp.totals, rounds: -1, cleanRounds: 'x', laps: 2.9 }
+  rp.daily = { ...rp.daily, roundsRewarded: -3 }
+  raw.profiles[1].laps = { sicilian: { n: 0, done: [] } }
+  raw.profiles[1].mainRoundBest = { sicilian: -1 }
+  raw.parent.includePlanB = 'no'
+  const v = storage.validateAppData(raw, NOW)
+  assert.ok(v.ok)
+  if (!v.ok) return
+  const p = prof(v.data)
+  assert.equal(p.lineStats.a.perfectDays, 9) // never more than the perfect runs
+  assert.equal(p.lineStats.a.lastPerfectDay, undefined)
+  assert.equal(p.lineStats.a.medal, undefined)
+  assert.equal(p.lineStats.b.perfectDays, undefined)
+  assert.equal(p.lineStats.b.medal, undefined)
+  assert.deepEqual([p.lineStats.c.perfectDays, p.lineStats.c.medal, p.lineStats.c.lastPerfectDay], [2, 3, '2026-10-01'])
+  assert.deepEqual(p.laps, { 'vs-d4': { n: 2, done: ['a', 'b'] } })
+  assert.equal(Object.getPrototypeOf(p.laps), Object.prototype)
+  assert.deepEqual(p.mainRoundBest, { other: 1234 })
+  assert.deepEqual([p.totals.rounds, p.totals.cleanRounds, p.totals.laps], [undefined, undefined, 2])
+  assert.equal((p.daily as DailyStateX).roundsRewarded, undefined)
+  const m = prof(v.data, 'minka')
+  assert.equal(m.laps, undefined)
+  assert.equal(m.mainRoundBest, undefined)
+  assert.equal(v.data.parent.includePlanB, undefined)
+  // a lap's done list is capped
+  const big = JSON.parse(JSON.stringify(base))
+  big.profiles[0].laps = { sicilian: { n: 1, done: Array.from({ length: 1500 }, (_, i) => `id${i}`) } }
+  const vb = storage.validateAppData(big, NOW)
+  assert.ok(vb.ok)
+  if (vb.ok) {
+    const done = prof(vb.data).laps!.sicilian.done
+    assert.equal(done.length, 1000)
+    assert.equal(done[999], 'id1499')
+  }
+  // A save written before this change (no new fields anywhere) loads exactly as it was
+  const legacy = patchProfile(fresh(), 'david', {
+    lineStats: { a: stats({ perfects: 12, box: 4 }), b: stats({ learnCompletions: 1 }) },
+    inOrderIndex: { sicilian: 7 },
+    achievements: { 'first-line': NOW - DAY },
+    coins: 321,
+    xp: 999,
+  })
+  const json = JSON.parse(JSON.stringify(legacy))
+  const lv = storage.validateAppData(json, NOW)
+  assert.ok(lv.ok)
+  if (!lv.ok) return
+  assert.deepEqual(lv.data, legacy)
+  const lp = prof(lv.data)
+  for (const k of ['laps', 'mainRoundBest'] as const) assert.ok(!(k in lp), k)
+  assert.deepEqual(Object.keys(lp.totals).sort(), ['blundersPunished', 'engineWins', 'lines', 'mistakesFixed', 'perfects'])
+  assert.deepEqual(Object.keys(lp.lineStats.a).sort(), ['attempts', 'box', 'completions', 'dueAt', 'lastMistakes', 'lastPracticed', 'perfects'])
+  assert.ok(!('roundsRewarded' in lp.daily))
+  assert.ok(!('includePlanB' in lv.data.parent))
+  // old stats keep working: the legacy perfect-day estimate and no medal until the next run
+  assert.equal(perfectDaysOf(lp.lineStats.a), 4)
+  assert.equal(medalOf(lp.lineStats.a), 0)
+})
+
+await test('medals: a jump writes one coin-history row per medal, matching the chips (review fix)', () => {
+  const run = (s: LineStats) =>
+    ops.applyLineResult(patchProfile(fresh(), 'david', { lineStats: { mh: s } }), 'david', input(tl('mh', 'main')), null)
+  // medal rows only (achievement rows, granted after them, sit on top), newest first
+  const rows = (o: ReturnType<typeof run>) =>
+    prof(o.data).history.filter((h) => h.reason.includes(' medal · ')).map((h) => [h.reason, h.delta])
+  // none → silver: "Bronze +10" and "Silver +25", never a single "Silver +35" row
+  const jump = run(stats({ perfects: 14, perfectDays: 3, lastPerfectDay: YESTERDAY, box: 2 }))
+  assert.deepEqual(jump.reward.medal, { level: 2, coins: 35 })
+  assert.deepEqual(rows(jump), [['🥈 Silver medal · Open Sicilian', 25], ['🥉 Bronze medal · Open Sicilian', 10]])
+  assert.ok(!prof(jump.data).history.some((h) => h.delta === 35))
+  // none → gold in one completion: three rows, three chips, 85 coins
+  const triple = run(stats({ perfects: 29, perfectDays: 7, lastPerfectDay: YESTERDAY, box: 2 }))
+  assert.deepEqual(triple.reward.medal, { level: 3, coins: 85 })
+  assert.deepEqual(rows(triple), [
+    ['🥇 Gold medal · Open Sicilian', 50],
+    ['🥈 Silver medal · Open Sicilian', 25],
+    ['🥉 Bronze medal · Open Sicilian', 10],
+  ])
+  assert.deepEqual(
+    triple.reward.breakdown.filter((b) => b.label.endsWith(' medal')).map((b) => [b.label, b.coins, b.emoji]),
+    [['Bronze medal', 10, '🥉'], ['Silver medal', 25, '🥈'], ['Gold medal', 50, '🥇']],
+  )
+  // every history row of this completion (line, medals, achievements) adds up to the coins paid
+  const p = prof(triple.data)
+  assert.equal(sum(p.history.map((h) => ({ coins: h.delta }))), triple.reward.coins)
+  assert.equal(sum(triple.reward.breakdown), triple.reward.coins)
+  assert.equal(p.coins, triple.reward.coins)
+  // a single level still writes exactly one medal row
+  const one = run(stats({ perfects: 4, perfectDays: 1, lastPerfectDay: YESTERDAY, box: 1 }))
+  assert.deepEqual(rows(one), [['🥉 Bronze medal · Open Sicilian', 10]])
+})
+
+await test('storage: a line-id rename that merges two saved entries keeps the best medal (never lost, never paid twice)', () => {
+  const ids = Object.entries(LINE_ID_MIGRATIONS)
+  if (ids.length === 0) return // no study change recorded in this build
+  const [oldId, newId] = ids[0]
+  const load = (ls: Record<string, LineStats>) => {
+    const v = storage.validateAppData(JSON.parse(JSON.stringify(patchProfile(fresh(), 'david', { lineStats: ls }))), NOW)
+    assert.ok(v.ok)
+    return v.ok ? prof(v.data).lineStats : {}
+  }
+  // the better entry (box 3, under the new id) wins, but the old entry's silver medal stays
+  const a = load({ [oldId]: stats({ box: 1, perfects: 20, medal: 2 }), [newId]: stats({ box: 3, perfects: 6 }) })
+  assert.equal(a[oldId], undefined)
+  assert.deepEqual([a[newId].box, a[newId].perfects, a[newId].medal], [3, 6, 2])
+  // the migrated entry wins; the medal already under the new id is kept
+  const b = load({ [oldId]: stats({ box: 4, perfects: 30 }), [newId]: stats({ box: 1, medal: 3 }) })
+  assert.deepEqual([b[newId].box, b[newId].perfects, b[newId].medal], [4, 30, 3])
+  // the higher medal of the two
+  const c = load({ [oldId]: stats({ box: 4, medal: 1 }), [newId]: stats({ box: 1, medal: 2 }) })
+  assert.deepEqual([c[newId].box, c[newId].medal], [4, 2])
+  // no medals: exactly what migrateLineStats gives (no medal field invented)
+  const e = load({ [oldId]: stats({ box: 2 }), [newId]: stats({ box: 1 }) })
+  assert.deepEqual(Object.keys(e), [newId])
+  assert.equal(e[newId].box, 2)
+  assert.ok(!('medal' in e[newId]))
+  // a plain rename carries the medal as it is
+  const f = load({ [oldId]: stats({ box: 2, medal: 1 }) })
+  assert.equal(f[newId].medal, 1)
+  // and the next qualifying completion of the merged line pays nothing again
+  const line = { ...tl(newId, 'main'), id: newId }
+  const d = patchProfile(fresh(), 'david', { lineStats: { [newId]: { ...a[newId], perfectDays: 9, lastPerfectDay: YESTERDAY } } })
+  const out = ops.applyLineResult(d, 'david', input(line), null)
+  assert.equal(out.reward.medal, undefined)
+  assert.equal(prof(out.data).lineStats[newId].medal, 2)
 })
 
 // ---------------------------------------------------------------------------

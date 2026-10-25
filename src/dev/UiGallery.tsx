@@ -39,8 +39,15 @@ import { BOARD_THEMES } from '../theme/boards.ts'
 import { PIECE_SET_NAMES, PiecePreview } from '../theme/pieces.tsx'
 import { isMuted, setMuted, sfx, type SfxName } from '../fx/sound.ts'
 import { celebrate, EFFECT_NAMES } from '../fx/celebrate.ts'
+import type { Line, LineStats } from '../types.ts'
+import type { LineReward } from '../store/appStore.ts'
+import type { LineOutcome, MainRoundView } from '../trainer/useTrainer.ts'
+import { LapCard, MainLinesCard, type MainToken } from '../screens/OpeningScreen.tsx'
+import { LineCompleteModal } from '../screens/trainer/LineCompleteModal.tsx'
+import { RoundCompleteModal } from '../screens/trainer/RoundCompleteModal.tsx'
+import '../screens/Trainer.css'
 
-type Section = 'components' | 'board' | 'themes' | 'fx' | 'layout' | 'selftest'
+type Section = 'components' | 'board' | 'themes' | 'fx' | 'practice' | 'layout' | 'selftest'
 
 const LEVEL: LevelInfo = { level: 3, name: 'Bishop', emoji: '♝', minXp: 600, nextXp: 1200 }
 const START = new Chess().fen()
@@ -48,7 +55,7 @@ const START = new Chess().fen()
 export default function UiGallery() {
   const [section, setSection] = useState<Section>(() => {
     const s = new URLSearchParams(window.location.search).get('s')
-    return (['components', 'board', 'themes', 'fx', 'layout', 'selftest'] as string[]).includes(s ?? '') ? (s as Section) : 'components'
+    return (['components', 'board', 'themes', 'fx', 'practice', 'layout', 'selftest'] as string[]).includes(s ?? '') ? (s as Section) : 'components'
   })
   const [theme, setTheme] = useState<BoardThemeId>('green')
   const [pieces, setPieces] = useState<PieceSetId>('cburnett')
@@ -94,6 +101,7 @@ export default function UiGallery() {
           {section === 'board' && <BoardSection theme={theme} pieces={pieces} setTheme={setTheme} setPieces={setPieces} />}
           {section === 'themes' && <ThemesSection theme={theme} pieces={pieces} setTheme={setTheme} setPieces={setPieces} />}
           {section === 'fx' && <FxSection />}
+          {section === 'practice' && <PracticeSection />}
           {section === 'selftest' && <SelfTestSection />}
         </div>
       )}
@@ -106,6 +114,7 @@ const SECTION_TABS = [
   { id: 'board' as const, label: 'Board', icon: '♟️' },
   { id: 'themes' as const, label: 'Themes & pieces', icon: '🎨' },
   { id: 'fx' as const, label: 'Sound & effects', icon: '🎉' },
+  { id: 'practice' as const, label: 'Practice', icon: '⭐' },
   { id: 'layout' as const, label: 'Trainer layout', icon: '📐' },
   { id: 'selftest' as const, label: 'Self-test', icon: '🧪' },
 ]
@@ -762,6 +771,300 @@ function FxSection() {
           </div>
         </div>
       </Card>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Practice structure (docs/practice-structure.md §5): Main Lines / lap cards,
+// the compact result card, medal + lap banners, the round-complete card.
+
+const DEMO_TOKENS_FRESH: MainToken[] = [
+  { id: 'a', title: 'Open Sicilian', medal: 0, reps: 0, today: false },
+  { id: 'b', title: 'Alapin', medal: 0, reps: 0, today: false },
+  { id: 'c', title: 'Delayed Alapin', medal: 0, reps: 0, today: false },
+  { id: 'd', title: 'Smith-Morra Gambit', medal: 0, reps: 0, today: false },
+  { id: 'e', title: 'Closed Sicilian', medal: 0, reps: 0, today: false },
+  { id: 'f', title: 'Side lines', medal: 0, reps: 0, today: false },
+]
+const DEMO_TOKENS: MainToken[] = [
+  { id: 'a', title: 'Open Sicilian', medal: 3, reps: 34, today: true },
+  { id: 'b', title: 'Alapin', medal: 2, reps: 17, today: true },
+  { id: 'c', title: 'Delayed Alapin', medal: 1, reps: 6, today: false },
+  { id: 'd', title: 'Smith-Morra Gambit', medal: 1, reps: 9, today: true },
+  { id: 'e', title: 'Closed Sicilian', medal: 0, reps: 3, today: false },
+  { id: 'f', title: 'Side lines', medal: 0, reps: 0, today: false },
+]
+
+const DEMO_LINE = {
+  id: 'demo-line',
+  openingId: 'sicilian',
+  chapterId: 'demo',
+  chapterTitle: 'Open Sicilian',
+  index: 0,
+  indexInChapter: 0,
+  name: 'Main line',
+  startFen: START,
+  moves: [],
+  userMoveCount: 11,
+  hasOpponentBlunder: false,
+  tier: 'main',
+} as Line
+
+const DEMO_STATS: LineStats = {
+  attempts: 9,
+  completions: 9,
+  perfects: 12,
+  box: 3,
+  lastPracticed: 0,
+  dueAt: 0,
+  lastMistakes: 0,
+  perfectDays: 3,
+  medal: 1,
+}
+
+function demoOutcome(id: number, reward: Partial<LineReward>, extra: Partial<LineOutcome> = {}): LineOutcome {
+  return {
+    id,
+    line: DEMO_LINE,
+    reward: {
+      coins: 26,
+      breakdown: [
+        { label: 'Line complete', coins: 16, emoji: '✅' },
+        { label: 'Perfect!', coins: 10, emoji: '⭐' },
+      ],
+      stars: 3,
+      newAchievements: [],
+      levelUp: null,
+      dailyGoalJustMet: false,
+      lineMastered: false,
+      farmed: false,
+      ...reward,
+    },
+    perfect: true,
+    learnMode: false,
+    mistakes: 0,
+    hintsUsed: 0,
+    combo: 2,
+    wrapped: false,
+    carried: false,
+    fen: START,
+    tier: 'main',
+    userMovesPlayed: 11,
+    roundDone: false,
+    ...extra,
+  }
+}
+
+const DEMO_ROUND_CLEAN: MainRoundView = {
+  order: ['a', 'b', 'c', 'd', 'e', 'f'],
+  pos: 5,
+  size: 6,
+  requeued: [],
+  firstTryPerfect: ['a', 'b', 'c', 'd', 'e', 'f'],
+  startedAt: 1,
+  result: {
+    ms: 252_000,
+    clean: true,
+    outcome: {
+      ok: true,
+      coins: 72,
+      breakdown: [
+        { label: 'Round bonus · 6 lines', coins: 12, emoji: '⭐' },
+        { label: 'Clean sweep', coins: 10, emoji: '🧹' },
+        { label: '🏅 Clean Sweep', coins: 50, emoji: '🧹' },
+      ],
+      bonusPaid: true,
+      roundsLeftToday: 2,
+      newBest: true,
+      bestMs: 252_000,
+      newAchievements: [{ id: 'clean-round', name: 'Clean Sweep', description: 'Play a main-line round with every line perfect', emoji: '🧹', coins: 50 }],
+      levelUp: null,
+    },
+  },
+}
+
+const DEMO_ROUND_CAPPED: MainRoundView = {
+  order: ['a', 'b', 'c', 'd', 'b'],
+  pos: 4,
+  size: 4,
+  requeued: ['b'],
+  firstTryPerfect: ['a', 'c', 'd'],
+  startedAt: 2,
+  result: {
+    ms: 241_000,
+    clean: false,
+    outcome: {
+      ok: true,
+      coins: 0,
+      breakdown: [],
+      bonusPaid: false,
+      roundsLeftToday: 0,
+      newBest: false,
+      bestMs: 198_000,
+      newAchievements: [],
+      levelUp: null,
+    },
+  },
+}
+
+type PracticeModal = 'compact' | 'compact-fix' | 'medal' | 'lap' | 'lap-done' | 'round' | 'round-capped'
+
+function PracticeSection() {
+  const [modal, setModal] = useState<PracticeModal | null>(null)
+  const [seq, setSeq] = useState(1)
+  const open = (m: PracticeModal) => {
+    setSeq((n) => n + 1)
+    setModal(m)
+  }
+  const close = () => setModal(null)
+  const noop = () => toast.info('Pressed')
+
+  let outcome: LineOutcome | null = null
+  let variant: 'full' | 'compact' = 'full'
+  let mode: 'main' | 'lap' = 'main'
+  let note: string | undefined
+  let stats: LineStats = DEMO_STATS
+  if (modal === 'compact') {
+    outcome = demoOutcome(seq, {})
+    variant = 'compact'
+  } else if (modal === 'compact-fix') {
+    outcome = demoOutcome(seq, { stars: 2, coins: 11, breakdown: [{ label: 'Line complete', coins: 11, emoji: '✅' }] }, { perfect: false, mistakes: 1 })
+    variant = 'compact'
+    note = "Let's fix that one at the end 💪"
+  } else if (modal === 'medal') {
+    outcome = demoOutcome(seq, {
+      coins: 51,
+      breakdown: [
+        { label: 'Line complete', coins: 16, emoji: '✅' },
+        { label: 'Perfect!', coins: 10, emoji: '⭐' },
+        { label: 'Silver medal', coins: 25, emoji: '🥈' },
+      ],
+      medal: { level: 2, coins: 25 },
+    })
+    // The stats after the run that earned Silver: the next line points at Gold.
+    stats = { ...DEMO_STATS, completions: 15, perfects: 15, perfectDays: 4, medal: 2 }
+  } else if (modal === 'lap' || modal === 'lap-done') {
+    mode = 'lap'
+    const done = modal === 'lap-done'
+    outcome = demoOutcome(
+      seq,
+      {
+        coins: done ? 124 : 16,
+        breakdown: done
+          ? [
+              { label: 'Line complete', coins: 16, emoji: '✅' },
+              { label: 'Lap 2 complete', coins: 108, emoji: '🌳' },
+            ]
+          : [{ label: 'Line complete', coins: 16, emoji: '✅' }],
+        lap: { openingId: 'sicilian', n: 2, done: done ? 54 : 39, total: 54, completed: done, coins: done ? 108 : 0 },
+      },
+      { tier: 'deep', line: { ...DEMO_LINE, tier: 'deep', name: '3.e5 d4 … 8.O-O', chapterTitle: 'Alapin (2.c3)' } },
+    )
+  }
+
+  return (
+    <>
+      <H>⭐ Main Lines card</H>
+      <div className="stack" style={{ maxWidth: 560 }}>
+        <MainLinesCard tokens={DEMO_TOKENS_FRESH} minutes={5} bestMs={null} bonusesLeft={3} onPlay={noop} />
+        <MainLinesCard tokens={DEMO_TOKENS} minutes={5} bestMs={252_000} bonusesLeft={1} onPlay={noop} />
+      </div>
+
+      <H>🌳 All Lines · Lap card</H>
+      <div className="stack" style={{ maxWidth: 560 }}>
+        <LapCard
+          n={1}
+          done={0}
+          total={54}
+          tiers={[
+            { tier: 'main', done: 0, total: 6 },
+            { tier: 'key', done: 0, total: 14 },
+            { tier: 'deep', done: 0, total: 9 },
+            { tier: 'planb', done: 0, total: 25 },
+          ]}
+          next={{ chapter: 'Open Sicilian', tier: 'main', name: 'Main line' }}
+          onPlay={noop}
+        />
+        <LapCard
+          n={2}
+          done={38}
+          total={54}
+          tiers={[
+            { tier: 'main', done: 6, total: 6 },
+            { tier: 'key', done: 14, total: 14 },
+            { tier: 'deep', done: 9, total: 9 },
+            { tier: 'planb', done: 9, total: 25 },
+          ]}
+          next={{ chapter: 'Closed Sicilian', tier: 'planb', name: '2...? 3.g3 …' }}
+          onPlay={noop}
+        />
+        <LapCard
+          n={3}
+          done={12}
+          total={29}
+          tiers={[
+            { tier: 'main', done: 6, total: 6 },
+            { tier: 'key', done: 6, total: 14 },
+            { tier: 'deep', done: 0, total: 9 },
+          ]}
+          next={{ chapter: 'Alapin', tier: 'key', name: '2...? 3.exd5' }}
+          onPlay={noop}
+        />
+      </div>
+
+      <H>Result cards</H>
+      <Card>
+        <div className="row row--wrap">
+          <Button variant="secondary" onClick={() => open('compact')}>
+            Compact (auto-next)
+          </Button>
+          <Button variant="secondary" onClick={() => open('compact-fix')}>
+            Compact · re-queued
+          </Button>
+          <Button variant="secondary" onClick={() => open('medal')}>
+            Medal banner
+          </Button>
+          <Button variant="secondary" onClick={() => open('lap')}>
+            Lap line
+          </Button>
+          <Button variant="secondary" onClick={() => open('lap-done')}>
+            Lap complete
+          </Button>
+          <Button variant="gold" onClick={() => open('round')}>
+            Round complete (clean, new best)
+          </Button>
+          <Button variant="gold" onClick={() => open('round-capped')}>
+            Round complete (no bonus left)
+          </Button>
+        </div>
+      </Card>
+
+      <LineCompleteModal
+        open={!!outcome}
+        outcome={outcome}
+        effect="confetti"
+        streak={4}
+        onNext={close}
+        onRetry={close}
+        onPlayOn={close}
+        onHome={close}
+        onClose={close}
+        variant={variant}
+        autoNextMs={variant === 'compact' ? 2500 : undefined}
+        mode={mode}
+        onEndRound={() => toast.info('End round pressed (the trainer asks first)')}
+        stats={stats}
+        note={note}
+      />
+      <RoundCompleteModal
+        open={modal === 'round' || modal === 'round-capped'}
+        round={modal === 'round-capped' ? DEMO_ROUND_CAPPED : DEMO_ROUND_CLEAN}
+        lineCoins={modal === 'round-capped' ? 8 : 132}
+        effect="confetti"
+        onAgain={close}
+        onBack={close}
+      />
     </>
   )
 }

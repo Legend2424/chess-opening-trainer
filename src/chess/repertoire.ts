@@ -6,6 +6,7 @@ import type { Chapter, ChapterRef, Line, MoveNode, OpeningDef, Repertoire } from
 import type { PgnGame, PgnNode } from './pgn.ts'
 import { combineComments } from './pgn.ts'
 import { STUDY_OVERRIDES, type StudyOverride } from '../data/studyOverrides.ts'
+import { classifyLines } from './lineTiers.ts'
 
 export const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 
@@ -731,6 +732,9 @@ export function buildRepertoire(def: OpeningDef, games: PgnGame[], opts: BuildOp
     nameSeen.set(key, k)
     line.name = `${line.name} (${k})`
   }
+
+  // Practice tiers (docs/practice-structure.md §1): computed on every build, never part of the id.
+  classifyLines(chapters, lines, userColor)
 
   const linesByNode = new Map<string, Line[]>()
   for (const line of lines) {

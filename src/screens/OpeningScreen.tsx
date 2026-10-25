@@ -1,29 +1,165 @@
-// Screen 3 — one opening (DESIGN.md §6.3): mastery overview and the ways to
-// practise it (Coach's Choice, all lines in order, one chapter, vs computer).
+// Screen 3 — one opening (DESIGN.md §6.3, docs/practice-structure.md §5.1): the
+// 🏆 Tournament-ready ring and the ways to practise it — Coach's Choice, a ⭐ Main
+// Lines round, the 🌳 All Lines lap, one chapter, vs computer.
 import { useEffect, type CSSProperties, type ReactNode } from 'react'
-import type { Line, Screen, TrainerMode } from '../types.ts'
+import type { Line, LineTier, Screen, TrainerMode } from '../types.ts'
 import { useNav } from '../app/nav.tsx'
 import { useRepertoire } from '../chess/useRepertoires.ts'
 import { openingProgress } from '../chess/scheduler.ts'
+import { userColorOf } from '../chess/repertoire.ts'
+import { TIER_META, estimateMinutes, lapLines, nextLapLine, tierOf } from '../chess/lineTiers.ts'
 import { openingById } from '../data/openings.ts'
-import { actions, useActiveProfile } from '../store/appStore.ts'
+import { actions, useActiveProfile, useParentSettings } from '../store/appStore.ts'
 import { currentStreak } from '../store/profileOps.ts'
+import { lapProgress, medalOf, readiness, roundBonusesLeft, ROUND_BONUSES_PER_DAY } from '../store/mastery.ts'
 import { levelForXp } from '../store/levels.ts'
 import { titleText } from '../store/catalog.ts'
 import { setMuted } from '../fx/sound.ts'
 import { Button, Card, Chip, ProgressBar, ProgressRing, Toggle, TopBar, cx } from '../components/ui/index.ts'
 import { inOrderKey } from '../trainer/useTrainer.ts'
+import { displayLineName } from './trainer/messages.ts'
+import {
+  bonusDots,
+  formatClock,
+  lapTierRows,
+  linesWord,
+  medalEmoji,
+  MEDAL_NAME,
+  playedToday,
+  shortChapterTitle,
+  tierLine,
+} from './trainer/practice.ts'
 import './OpeningScreen.css'
 
 type OpeningParams = Extract<Screen, { name: 'opening' }>
 
-function linesWord(n: number): string {
-  return n === 1 ? '1 line' : `${n} lines`
+// ---------------------------------------------------------------------------
+// ⭐ Main Lines card and 🌳 lap card (also shown in the UI gallery)
+// ---------------------------------------------------------------------------
+
+/** One main line (one per chapter) on the Main Lines card. */
+export interface MainToken {
+  id: string
+  /** Short chapter title. */
+  title: string
+  medal: 0 | 1 | 2 | 3
+  /** Perfect runs ("Rep #N"). */
+  reps: number
+  /** Completed today. */
+  today: boolean
+}
+
+export interface MainLinesCardProps {
+  tokens: MainToken[]
+  /** Rough round time in minutes. */
+  minutes: number
+  /** Fastest clean round (ms), or null. */
+  bestMs: number | null
+  /** Round bonuses still paid today. */
+  bonusesLeft: number
+  onPlay: () => void
+  className?: string
+}
+
+export function MainLinesCard({ tokens, minutes, bestMs, bonusesLeft, onPlay, className }: MainLinesCardProps) {
+  return (
+    <Card className={cx('oq-pcard oq-main', className)} padding="none">
+      <div className="oq-pcard__head">
+        <span className="oq-pcard__icon" aria-hidden>
+          ⭐
+        </span>
+        <span className="opening__card-title">Main Lines</span>
+        <span className="oq-pcard__aside">
+          <span>{bestMs ? `🏁 Best ${formatClock(bestMs)}` : '🏁 No best yet'}</span>
+          <span className="oq-main__bonus" aria-label={`${bonusesLeft} of ${ROUND_BONUSES_PER_DAY} round bonuses left today`}>
+            Bonuses <b aria-hidden>{bonusDots(bonusesLeft)}</b>
+          </span>
+        </span>
+      </div>
+      <ul className="oq-tokens" aria-label="Your main lines">
+        {tokens.map((t) => (
+          <li
+            key={t.id}
+            className={cx('oq-token', t.medal > 0 && `oq-token--m${t.medal}`, t.today && 'is-today')}
+            aria-label={`${t.title}: ${t.medal ? `${MEDAL_NAME[t.medal]} medal` : 'no medal yet'}, ${t.reps} perfect runs${t.today ? ', played today' : ''}`}
+          >
+            <span className="oq-token__title">{t.title}</span>
+            <span className="oq-token__medal" aria-hidden>
+              {medalEmoji(t.medal) || '○'}
+            </span>
+            <span className="oq-token__reps num" aria-hidden>
+              ×{t.reps}
+            </span>
+            {t.today && (
+              <span className="oq-token__today" aria-hidden>
+                ✓
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+      <Button variant="gold" size="md" block icon="▶" className="oq-pcard__go" onClick={onPlay}>
+        Round · {linesWord(tokens.length)} · ~{minutes} min
+      </Button>
+    </Card>
+  )
+}
+
+export interface LapCardProps {
+  n: number
+  done: number
+  total: number
+  tiers: Array<{ tier: LineTier; done: number; total: number }>
+  /** The next line of the lap (kid moves hidden), or null. */
+  next: { chapter: string; tier: LineTier; name: string } | null
+  onPlay: () => void
+  className?: string
+}
+
+export function LapCard({ n, done, total, tiers, next, onPlay, className }: LapCardProps) {
+  return (
+    <Card className={cx('oq-pcard oq-lap', className)} padding="none">
+      <div className="oq-pcard__head">
+        <span className="oq-pcard__icon" aria-hidden>
+          🌳
+        </span>
+        <span className="opening__card-title">
+          All Lines · Lap <span className="num">{n}</span>
+        </span>
+        <span className="oq-pcard__aside oq-lap__count num">
+          {done}/{total}
+        </span>
+      </div>
+      <ProgressBar value={done} max={total} height={10} color="linear-gradient(90deg, #4ade80, #16a34a)" />
+      <div className="oq-lap__tiers" aria-label="This lap by kind of line">
+        {tiers.map((r) => (
+          <span key={r.tier} className={cx('oq-lap__tier', r.total > 0 && r.done >= r.total && 'is-done')} title={TIER_META[r.tier].plural}>
+            {TIER_META[r.tier].emoji} <span className="num">{r.done}/{r.total}</span>
+          </span>
+        ))}
+      </div>
+      <div className="oq-pcard__foot">
+        <span className="oq-lap__next">
+          {next ? (
+            <>
+              Next: <b>{next.chapter}</b> · {TIER_META[next.tier].emoji} {next.name}
+            </>
+          ) : (
+            'Every line, one after another'
+          )}
+        </span>
+        <Button variant="success" size="md" icon="▶" className="oq-pcard__go" onClick={onPlay}>
+          {done === 0 ? 'Start lap' : 'Continue lap'}
+        </Button>
+      </div>
+    </Card>
+  )
 }
 
 export default function OpeningScreen({ params }: { params: OpeningParams }) {
   const nav = useNav()
   const profile = useActiveProfile()
+  const parent = useParentSettings()
   const def = openingById(params.openingId)
   const { status, rep, error } = useRepertoire(params.openingId)
 
@@ -77,11 +213,41 @@ export default function OpeningScreen({ params }: { params: OpeningParams }) {
 
   const stats = profile.lineStats
   const lines: Line[] = rep?.lines ?? []
+  const userColor = userColorOf(def)
   const prog = openingProgress(lines, stats, now)
   const newCount = prog.total - prog.seen
-  const orderKey = inOrderKey(def.id, 'inorder')
-  const orderIdx = lines.length ? ((profile.inOrderIndex[orderKey] ?? 0) % lines.length + lines.length) % lines.length : 0
-  const nextInOrder = lines[orderIdx]
+  // Coach's Choice never serves Plan B lines: its "to review" / "new" counts leave them out.
+  const coachProg = openingProgress(
+    lines.filter((l) => tierOf(l) !== 'planb'),
+    stats,
+    now,
+  )
+  const coachNew = coachProg.total - coachProg.seen
+  const ready = readiness(lines, stats)
+
+  // ⭐ Main Lines: one token per chapter's main line.
+  const mainLines = lines.filter((l) => tierOf(l) === 'main')
+  const tokens: MainToken[] = mainLines.map((l) => {
+    const s = stats[l.id]
+    return {
+      id: l.id,
+      title: shortChapterTitle(l.chapterTitle),
+      medal: medalOf(s),
+      reps: s ? Math.max(0, Math.floor(s.perfects) || 0) : 0,
+      today: playedToday(s, now),
+    }
+  })
+  const bestMs = profile.mainRoundBest?.[def.id] ?? null
+
+  // 🌳 Lap: every line (Plan B only when the parent has it on), in lap order.
+  const includePlanB = parent.includePlanB !== false
+  const lapSet = lapLines(lines, includePlanB)
+  const lap = lapProgress(
+    profile,
+    def.id,
+    lapSet.map((l) => l.id),
+  )
+  const nextLap = nextLapLine(lapSet, lap.doneIds) ?? lapSet[0] ?? null
   const sideLabel = def.side === 'white' ? 'White' : 'Black'
   // The side is already on the chip: "You play Black against 1.e4" -> "Against 1.e4".
   const tagRest = def.tagline.replace(/^you play (white|black)[:,]?\s*/i, '')
@@ -133,55 +299,47 @@ export default function OpeningScreen({ params }: { params: OpeningParams }) {
             <span className="opening__coach-text">
               <span>Coach's Choice</span>
               <small>
-                {newCount > 0 && prog.due > 0
-                  ? `New lines + ${prog.due} to review`
-                  : prog.due > 0
-                    ? `${prog.due} ${prog.due === 1 ? 'line' : 'lines'} to review`
-                    : newCount > 0
+                {coachNew > 0 && coachProg.due > 0
+                  ? `New lines + ${coachProg.due} to review`
+                  : coachProg.due > 0
+                    ? `${coachProg.due} ${coachProg.due === 1 ? 'line' : 'lines'} to review`
+                    : coachNew > 0
                       ? 'Learn new lines'
                       : 'Keep your lines sharp'}
               </small>
             </span>
           </Button>
 
-          <Card className="opening__order" padding="sm">
-            <div className="opening__order-head">
-              <span className="opening__order-icon" aria-hidden>
-                📚
-              </span>
-              <div className="opening__order-text">
-                <div className="opening__card-title">All lines in order</div>
-                <div className="opening__order-sub">
-                  Line <b className="num">{orderIdx + 1}</b> of <b className="num">{lines.length}</b>
-                  {nextInOrder && (
-                    <span className="opening__order-next">
-                      {' '}
-                      · {nextInOrder.chapterTitle}
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
-            <ProgressBar value={orderIdx} max={lines.length} height={10} />
-            <div className="opening__order-actions">
-              <Button variant="info" size="md" icon="▶" className="opening__grow" onClick={() => train('inorder')}>
-                {orderIdx === 0 ? 'Start' : 'Continue'}
-              </Button>
-              {orderIdx > 0 && (
-                <Button
-                  variant="secondary"
-                  size="md"
-                  icon="⏮"
-                  onClick={() => {
-                    actions.setInOrderIndex(orderKey, 0)
-                    train('inorder')
-                  }}
-                >
-                  Start over
-                </Button>
-              )}
-            </div>
-          </Card>
+          {mainLines.length > 0 && (
+            <MainLinesCard
+              className="opening__anim2"
+              tokens={tokens}
+              minutes={estimateMinutes(mainLines, userColor)}
+              bestMs={bestMs}
+              bonusesLeft={roundBonusesLeft(profile, now)}
+              onPlay={() => train('main')}
+            />
+          )}
+
+          {lapSet.length > 0 && (
+            <LapCard
+              className="opening__anim3"
+              n={lap.n}
+              done={lap.done}
+              total={lap.total}
+              tiers={lapTierRows(lapSet, lap.doneIds)}
+              next={
+                nextLap
+                  ? {
+                      chapter: shortChapterTitle(nextLap.chapterTitle),
+                      tier: tierOf(nextLap),
+                      name: displayLineName(nextLap, 0, false, userColor),
+                    }
+                  : null
+              }
+              onPlay={() => train('lap')}
+            />
+          )}
 
           <div className="opening__extras">
             <Toggle
@@ -189,7 +347,15 @@ export default function OpeningScreen({ params }: { params: OpeningParams }) {
               checked={learnMode}
               onChange={(v) => actions.setSetting('learnMode', v)}
               label="👀 Show me the moves"
-              description={learnMode ? 'Arrows show every move (half coins)' : 'Turn on to see an arrow for every move'}
+              description={
+                // iPad landscape has room for one short line only; the half-coins warning stays.
+                <>
+                  <span className="opening__desc-long">
+                    {learnMode ? 'Arrows show every move (half coins)' : 'Turn on to see an arrow for every move'}
+                  </span>
+                  <span className="opening__desc-short">{learnMode ? 'Arrows on · half coins' : 'An arrow for every move'}</span>
+                </>
+              }
               onIcon="👀"
             />
 
@@ -238,6 +404,11 @@ export default function OpeningScreen({ params }: { params: OpeningParams }) {
                           </Chip>
                         )}
                       </span>
+                      {!empty && (
+                        <span className="chapter-row__tiers" aria-label="Kinds of lines">
+                          {tierLine(chLines)}
+                        </span>
+                      )}
                       <span className="chapter-row__meta">
                         {empty ? (
                           'No lines yet'
@@ -289,9 +460,9 @@ export default function OpeningScreen({ params }: { params: OpeningParams }) {
                 <span className="opening__side-dot" aria-hidden />
                 You play {sideLabel}
               </span>
-              {rep && prog.due > 0 && (
+              {rep && coachProg.due > 0 && (
                 <Chip tone="blue" icon="🧠">
-                  {prog.due} to review
+                  {coachProg.due} to review
                 </Chip>
               )}
               {rep && newCount > 0 && (
@@ -305,23 +476,29 @@ export default function OpeningScreen({ params }: { params: OpeningParams }) {
           {rep && (
             <div className="opening__mastery">
               <ProgressRing
-                value={prog.total ? prog.mastered / prog.total : 0}
+                value={ready.percent / 100}
                 size={92}
                 color={['#fff3b0', '#ffc21a']}
                 trackColor="rgba(255,255,255,0.3)"
-                ariaLabel={`${prog.percentMastered}% mastered`}
+                ariaLabel={`Tournament ready: ${ready.percent}%`}
               >
-                <span className="opening__ring-pct">{prog.percentMastered}%</span>
+                <span className="opening__ring-pct">
+                  {ready.percent}%<small>{ready.ready ? '🏆 ready!' : '🏆 ready'}</small>
+                </span>
               </ProgressRing>
               <div className="opening__counts">
+                {ready.mains > 0 && (
+                  <span title="Main lines with a gold medal">
+                    ⭐ <b className="num">{ready.mainsByMedal[2]}</b>/{ready.mains} 🥇
+                  </span>
+                )}
+                {ready.keys > 0 && (
+                  <span title="Key replies mastered">
+                    🔑 <b className="num">{ready.keysMastered}</b>/{ready.keys} ✅
+                  </span>
+                )}
                 <span>
-                  <b className="num">{prog.mastered}</b> mastered
-                </span>
-                <span>
-                  <b className="num">{prog.seen}</b> seen
-                </span>
-                <span>
-                  <b className="num">{prog.total}</b> lines
+                  <b className="num">{prog.mastered}</b>/{prog.total} mastered
                 </span>
               </div>
             </div>

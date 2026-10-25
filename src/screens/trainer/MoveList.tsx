@@ -11,7 +11,7 @@ export interface MoveListProps {
   className?: string
 }
 
-/** The moves played so far, "1.e4 c5 2.Nf3 …", newest highlighted. */
+/** The moves played so far, "1.e4 c5 2.Nf3 …", newest highlighted; a branch start's auto-played moves in grey. */
 export function MoveList({ startFen, history, wrong, userColor, className }: MoveListProps) {
   const parts = startFen.split(/\s+/)
   let side: 'w' | 'b' = parts[1] === 'b' ? 'b' : 'w'
@@ -32,7 +32,7 @@ export function MoveList({ startFen, history, wrong, userColor, className }: Mov
     const isWrong = !!wrong && i === moves.length - 1
     const label = side === 'w' ? `${num}.` : i === 0 ? `${num}...` : ''
     const item = (
-      <span key={i} className="mlist__item">
+      <span key={i} className={cx('mlist__item', m.skipped && 'is-skipped')} title={m.skipped ? 'Played for you (skipped ahead)' : undefined}>
         {label && <span className="mlist__num">{label}</span>}
         <span
           className={cx(
@@ -40,6 +40,7 @@ export function MoveList({ startFen, history, wrong, userColor, className }: Mov
             m.by === 'user' ? 'is-user' : 'is-opp',
             i === moves.length - 1 && 'is-last',
             isWrong && 'is-wrong',
+            m.skipped && 'is-skipped',
           )}
         >
           {m.san}

@@ -6,6 +6,7 @@ import type {
   AppData,
   CoinEvent,
   ItemKind,
+  LapRecord,
   LineStats,
   ParentSettings,
   Profile,
@@ -217,13 +218,72 @@ function normLineStats(x: unknown): LineStats | null {
   if (lc > 0) s.learnCompletions = Math.min(lc, s.completions)
   if (x.learnPending === true) s.learnPending = true
   if (x.quickRetryUsed === true) s.quickRetryUsed = true
+  // Medal record (docs/practice-structure.md §3.2). A perfect day needs a perfect run.
+  if (isNum(x.perfectDays) && x.perfectDays >= 0) s.perfectDays = Math.min(Math.floor(x.perfectDays), s.perfects)
+  if (isDateKey(x.lastPerfectDay)) s.lastPerfectDay = x.lastPerfectDay
+  if (x.medal === 1 || x.medal === 2 || x.medal === 3) s.medal = x.medal
   return s
+}
+
+/** The current id of a line saved under `id` (LINE_ID_MIGRATIONS, same rule as migrateLineStats). */
+function renamedLineId(id: string): string {
+  return Object.prototype.hasOwnProperty.call(LINE_ID_MIGRATIONS, id) && LINE_ID_MIGRATIONS[id] ? LINE_ID_MIGRATIONS[id] : id
+}
+
+/**
+ * A new study renames lines; progress follows lines whose moves didn't change.
+ * migrateLineStats keeps one entry whole when several saved ids land on the same
+ * line. A medal is never lost and never paid twice (docs/practice-structure.md
+ * §3.2), so the kept entry gets the best medal of every entry merged into it.
+ */
+function migrateStats(lineStats: Record<string, LineStats>): Record<string, LineStats> {
+  const out = migrateLineStats(lineStats, LINE_ID_MIGRATIONS)
+  if (out === lineStats) return out
+  for (const [id, s] of Object.entries(lineStats)) {
+    if (s.medal === undefined) continue
+    const to = renamedLineId(id)
+    const kept = Object.prototype.hasOwnProperty.call(out, to) ? out[to] : undefined
+    if (kept && (kept.medal ?? 0) < s.medal) out[to] = { ...kept, medal: s.medal }
+  }
+  return out
+}
+
+/** Most line ids kept in one opening's current lap (the biggest opening has ~55 lines). */
+const LAP_DONE_CAP = 1000
+
+/**
+ * profile.laps: per opening `n` an integer >= 1 and `done` unique line ids
+ * (invalid entries dropped). Renamed line ids follow LINE_ID_MIGRATIONS, like lineStats.
+ */
+function normLaps(x: unknown): Record<string, LapRecord> | undefined {
+  if (!isObj(x)) return undefined
+  const out: Record<string, LapRecord> = {}
+  let any = false
+  for (const [k, v] of safeEntries(x)) {
+    if (!isObj(v) || !isNum(v.n) || v.n < 1) continue
+    out[k] = { n: Math.floor(v.n), done: Array.from(new Set(strArray(v.done).map(renamedLineId))).slice(-LAP_DONE_CAP) }
+    any = true
+  }
+  return any ? out : undefined
+}
+
+/** profile.mainRoundBest: per opening a finite time > 0 (ms). */
+function normRoundBest(x: unknown): Record<string, number> | undefined {
+  if (!isObj(x)) return undefined
+  const out: Record<string, number> = {}
+  let any = false
+  for (const [k, v] of safeEntries(x)) {
+    if (!isNum(v) || v <= 0) continue
+    out[k] = v
+    any = true
+  }
+  return any ? out : undefined
 }
 
 function normDaily(x: unknown, now: number): DailyStateX {
   if (!isObj(x) || !isDateKey(x.date)) return emptyDaily(localDateKey(now))
   const ids = Array.from(new Set(strArray(x.distinctLineIds)))
-  return {
+  const d: DailyStateX = {
     date: x.date,
     lines: Array.isArray(x.distinctLineIds) ? ids.length : int0(x.lines),
     perfects: int0(x.perfects),
@@ -233,6 +293,9 @@ function normDaily(x: unknown, now: number): DailyStateX {
     engineGamesRewarded: int0(x.engineGamesRewarded),
     distinctLineIds: ids,
   }
+  // Main-line round bonuses paid today (absent = 0).
+  if (isNum(x.roundsRewarded) && x.roundsRewarded >= 0) d.roundsRewarded = Math.floor(x.roundsRewarded)
+  return d
 }
 
 function normRedemption(x: unknown): Redemption | null {
@@ -315,6 +378,21 @@ function normProfile(x: unknown, now: number): Profile | string {
     ? x.history.map(normEvent).filter((e): e is CoinEvent => e !== null).slice(0, HISTORY_CAP)
     : []
 
+  const totals: Profile['totals'] = {
+    lines: int0(t.lines),
+    perfects: int0(t.perfects),
+    mistakesFixed: int0(t.mistakesFixed),
+    engineWins: int0(t.engineWins),
+    blundersPunished: int0(t.blundersPunished),
+  }
+  // Main-line rounds / clean rounds / laps finished (absent on old saves).
+  for (const k of ['rounds', 'cleanRounds', 'laps'] as const) {
+    const v = t[k]
+    if (isNum(v) && v >= 0) totals[k] = Math.floor(v)
+  }
+  const laps = normLaps(x.laps)
+  const mainRoundBest = normRoundBest(x.mainRoundBest)
+
   return {
     id: x.id,
     name: x.name.trim().slice(0, 20),
@@ -322,8 +400,8 @@ function normProfile(x: unknown, now: number): Profile | string {
     color: typeof x.color === 'string' && x.color ? x.color.slice(0, 40) : (seed?.color ?? '#6c4bf4'),
     coins: Math.floor(x.coins),
     xp: Math.floor(x.xp),
-    // A new study renames lines; progress follows lines whose moves didn't change.
-    lineStats: migrateLineStats(lineStats, LINE_ID_MIGRATIONS),
+    // A new study renames lines; progress (and every medal) follows lines whose moves didn't change.
+    lineStats: migrateStats(lineStats),
     inOrderIndex,
     owned,
     equipped,
@@ -332,13 +410,9 @@ function normProfile(x: unknown, now: number): Profile | string {
     streakDays: int0(x.streakDays),
     lastGoalDate: isDateKey(x.lastGoalDate) ? x.lastGoalDate : '',
     bestCombo: int0(x.bestCombo),
-    totals: {
-      lines: int0(t.lines),
-      perfects: int0(t.perfects),
-      mistakesFixed: int0(t.mistakesFixed),
-      engineWins: int0(t.engineWins),
-      blundersPunished: int0(t.blundersPunished),
-    },
+    totals,
+    ...(laps ? { laps } : {}),
+    ...(mainRoundBest ? { mainRoundBest } : {}),
     redemptions,
     history,
     settings,
@@ -389,6 +463,7 @@ function normParent(x: unknown): ParentSettings | string {
     enabledExtras: Array.from(new Set(strArray(x.enabledExtras))),
     dailyGoalLines: goal,
   }
+  if (typeof x.includePlanB === 'boolean') out.includePlanB = x.includePlanB
   if (isNum(x.pinResetAt) && x.pinResetAt > 0) out.pinResetAt = x.pinResetAt
   if (Array.isArray(x.pinResets)) {
     const resets = Array.from(new Set(x.pinResets.filter((t): t is number => isNum(t) && t > 0))).sort((a, b) => a - b).slice(-10)

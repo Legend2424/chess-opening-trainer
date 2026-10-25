@@ -4,11 +4,13 @@
 import type { ReactNode } from 'react'
 import { SpeechBubble, type SpeechBubbleProps } from '../../components/ui/index.ts'
 import { isBlunder, moveLabel, positionKey } from '../../chess/repertoire.ts'
+import { mainAlternative } from '../../chess/lineTiers.ts'
 import type { Repertoire, TrainerMode } from '../../types.ts'
 import type { Feedback, TrainerState } from '../../trainer/trainerReducer.ts'
 import type { MistakeInsight } from '../../trainer/useTrainer.ts'
 import {
   PRAISE_LINES,
+  SKIP_AHEAD_LINE,
   WRONG_LINES,
   YOUR_MOVE_LINES,
   insightText,
@@ -52,6 +54,8 @@ interface Model {
   headline?: ReactNode
   body?: ReactNode
   notes?: CoachNote[]
+  /** Small extra line above the notes ("🌿 New branch! …"). */
+  tag?: ReactNode
 }
 
 function notesKey(notes: CoachNote[]): string {
@@ -96,7 +100,36 @@ function surprise({ state, rep, mode }: CoachBubbleProps): ReactNode | null {
   return null
 }
 
+/**
+ * The opponent just left the chapter's first choice (docs/practice-structure.md §2.6):
+ * "🌿 New branch! Instead of 3.exd5 they play 3.e5." Not on the line's first opponent move
+ * (surprise() covers that) and not for a move a branch start played for the kid.
+ */
+function newBranch({ state, rep }: CoachBubbleProps): ReactNode | null {
+  if (!rep || state.phase !== 'userToMove' || state.ply <= state.startPly) return null
+  const opp = lastOpponentMove(state)
+  if (!opp) return null
+  const u = state.config.userColor
+  if (state.line.moves.findIndex((m) => m.color !== u) === state.ply - 1) return null
+  const alt = mainAlternative(rep, opp)
+  if (!alt) return null
+  return (
+    <>
+      🌿 New branch! Instead of <b className="coach__move">{moveLabel(alt)}</b> they play <b className="coach__move">{moveLabel(opp)}</b>.
+    </>
+  )
+}
+
 function buildModel(props: CoachBubbleProps): Model {
+  const m = buildBaseModel(props)
+  // The new-branch tag rides along with Hoot's usual "your move" messages (not with a mistake,
+  // a hint or the end of the line, which replace them).
+  if (m.tone === 'error' || props.state.phase !== 'userToMove' || props.feedback?.kind === 'hint' || props.feedback?.kind === 'other-line') return m
+  const tag = newBranch(props)
+  return tag ? { ...m, tag } : m
+}
+
+function buildBaseModel(props: CoachBubbleProps): Model {
   const { state, feedback: fb, insight, learnMode, intro, fork, tailShowing } = props
   const notes = recentNotes(state)
   const opp = lastOpponentMove(state)
@@ -218,6 +251,27 @@ function buildModel(props: CoachBubbleProps): Model {
     }
   }
 
+  // Branch start (lap mode): the shared start was played for the kid; first move of the run.
+  if (state.startPly > 0 && state.ply === state.startPly && state.phase === 'userToMove') {
+    let body: ReactNode
+    if (learnMode) body = '👀 Follow the yellow arrow — and try to remember it!'
+    else if (fork && state.hintLevel === 0)
+      body = (
+        <span className="coach__tip">
+          🔀 Your study has {fork.count} good moves here — {fork.target ? 'the glowing square shows where this line goes. ✨' : 'the glowing piece is the one this line moves. ✨'}
+        </span>
+      )
+    else
+      body = opp ? (
+        <>
+          Your opponent played <b className="coach__move">{moveLabel(opp)}</b>. What's your move? 🤔
+        </>
+      ) : (
+        "Your move! What's next? 🤔"
+      )
+    return { key: `skip${state.line.id}${state.hintLevel}`, tone: 'info', speaker: '🦉', headline: SKIP_AHEAD_LINE, body, notes }
+  }
+
   const surpriseText = surprise(props)
   if (surpriseText) {
     return { key: `sur${state.line.id}`, tone: 'gold', speaker: '🦉', headline: surpriseText, notes }
@@ -296,6 +350,7 @@ export function CoachBubble(props: CoachBubbleProps) {
   return (
     <SpeechBubble tone={m.tone} speaker={m.speaker} animateKey={m.key} speakerSize={46} className={props.className}>
       {m.headline && <div className="coach__headline">{m.headline}</div>}
+      {m.tag && <div className="coach__tag">{m.tag}</div>}
       {m.notes && m.notes.length > 0 && (
         <ul className="coach__notes">
           {m.notes.map((n) => (

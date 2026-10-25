@@ -37,7 +37,12 @@ export interface PlayedMove {
   fen: string
   by: 'user' | 'opponent'
   nodeId: string | null
+  /** Auto-played by a branch start (the shared start of a line the kid already knows). */
+  skipped?: boolean
 }
+
+/** Per user move: still to play, right first time, fixed after a try, or skipped by a branch start. */
+export type UserMoveMark = 'pending' | 'clean' | 'fixed' | 'skip'
 
 export interface TrainerConfig {
   mode: TrainerMode
@@ -81,8 +86,8 @@ export interface TrainerState {
   /** Hints requested via the 'hint' action (free highlights are not counted). */
   hintsUsed: number
   usedArrowHint: boolean
-  /** One per user move in line.moves. */
-  userMoveMarks: ('pending' | 'clean' | 'fixed')[]
+  /** One per user move in line.moves ('skip' for the ones a branch start played). */
+  userMoveMarks: UserMoveMark[]
   opponentBlundered: boolean
   feedback: Feedback | null
   // --- additions beyond DESIGN.md §2 (needed to keep the reducer pure) ---
@@ -94,6 +99,11 @@ export interface TrainerState {
   startCandidates: string[]
   /** After 'complete': how many moves of `line.tail` ("what happens next" / trap demo) are on the board. */
   tailPly: number
+  /**
+   * Branch start: the run began at this ply (the moves before it were auto-played, `skipped` in
+   * history, 'skip' marks); 0 = from move 1. 'restart' comes back here.
+   */
+  startPly: number
 }
 
 export interface TrainerContext {
@@ -158,29 +168,58 @@ function phaseAt(line: Line, ply: number, userColor: 'w' | 'b'): Phase {
   return next.color === userColor ? 'userToMove' : 'opponentToMove'
 }
 
-function fresh(line: Line, config: TrainerConfig, startCandidates: string[], feedbackSeq: number): TrainerState {
+/**
+ * The moves before `startPly`, replayed with chess.js (instant set-up of a branch start). null when
+ * `startPly` can't be a branch start: not an integer in (0, moves.length), `moves[startPly]` isn't a
+ * user move, or a prefix move doesn't replay from the line's start position.
+ */
+function replayPrefix(line: Line, startPly: number, userColor: 'w' | 'b'): PlayedMove[] | null {
+  if (!Number.isInteger(startPly) || startPly <= 0 || startPly >= line.moves.length) return null
+  if (line.moves[startPly].color !== userColor) return null
+  const out: PlayedMove[] = []
+  try {
+    const chess = new Chess(line.startFen)
+    for (let k = 0; k < startPly; k++) {
+      const n = line.moves[k]
+      const m = chess.move(n.promotion ? { from: n.from, to: n.to, promotion: n.promotion } : { from: n.from, to: n.to })
+      out.push({ san: m.san, uci: n.uci, from: m.from, to: m.to, fen: m.after, by: n.color === userColor ? 'user' : 'opponent', nodeId: n.id, skipped: true })
+    }
+  } catch {
+    return null
+  }
+  return out
+}
+
+function fresh(line: Line, config: TrainerConfig, startCandidates: string[], feedbackSeq: number, startPly = 0): TrainerState {
+  const prefix = startPly > 0 && config.mode !== 'random' ? replayPrefix(line, startPly, config.userColor) : null
+  const ply = prefix ? prefix.length : 0
+  const last = prefix ? prefix[prefix.length - 1] : null
+  const marks: UserMoveMark[] = new Array(countUserMoves(line, config.userColor)).fill('pending')
+  const skipped = countUserMoves(line, config.userColor, ply)
+  for (let i = 0; i < skipped; i++) marks[i] = 'skip'
   return {
     config,
     line,
     candidates: startCandidates.slice(),
-    ply: 0,
-    fen: line.startFen,
-    history: [],
-    lastMove: null,
-    phase: phaseAt(line, 0, config.userColor),
+    ply,
+    fen: last ? last.fen : line.startFen,
+    history: prefix ?? [],
+    lastMove: last ? [last.from, last.to] : null,
+    phase: phaseAt(line, ply, config.userColor),
     wrong: null,
     mistakes: 0,
     mistakesHere: 0,
     hintLevel: 0,
     hintsUsed: 0,
     usedArrowHint: false,
-    userMoveMarks: new Array(countUserMoves(line, config.userColor)).fill('pending'),
+    userMoveMarks: marks,
     opponentBlundered: false,
     feedback: null,
     hintsHere: 0,
     feedbackSeq,
     startCandidates,
     tailPly: 0,
+    startPly: ply,
   }
 }
 
@@ -295,14 +334,27 @@ function advanceUser(state: TrainerState, node: MoveNode, played: PlayedMove, ki
 // Public API
 // ---------------------------------------------------------------------------
 
-export function initTrainer(line: Line, config: TrainerConfig, ctx: TrainerContext): TrainerState {
+/**
+ * A new run of `line`. `startPly` (a branch start, fixed-target modes only) auto-plays the moves
+ * before it: it is used only if mode !== 'random', it is an integer in (0, moves.length),
+ * moves[startPly] is a user move and every prefix move replays with chess.js; otherwise the run
+ * starts from move 1.
+ */
+export function initTrainer(line: Line, config: TrainerConfig, ctx: TrainerContext, startPly?: number): TrainerState {
   let start: string[] = []
   if (config.mode === 'random') {
     const key = positionKey(line.startFen)
     start = ctx.rep.lines.filter((l) => positionKey(l.startFen) === key).map((l) => l.id)
     if (!start.includes(line.id)) start.push(line.id)
   }
-  return fresh(line, config, start, 0)
+  return fresh(line, config, start, 0, startPly ?? 0)
+}
+
+/** User moves a branch start played for the kid (0 = the run started from move 1). */
+export function skippedUserMoves(state: TrainerState): number {
+  let n = 0
+  for (const m of state.userMoveMarks) if (m === 'skip') n++
+  return n
 }
 
 /** line.moves[ply] when it is the user's turn (also while a wrong move is shown). */
@@ -351,7 +403,7 @@ export function trainerReducer(state: TrainerState, action: TrainerAction): Trai
       // starts elsewhere, so the old candidates would not match the board: restart on it alone.
       let start = state.startCandidates.slice()
       if (state.config.mode === 'random' && !start.includes(state.line.id)) start = [state.line.id]
-      return fresh(state.line, state.config, start, state.feedbackSeq)
+      return fresh(state.line, state.config, start, state.feedbackSeq, state.startPly ?? 0)
     }
     default:
       return state

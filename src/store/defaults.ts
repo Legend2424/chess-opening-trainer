@@ -39,8 +39,10 @@ export function previousDateKey(key: string): string {
  * DailyState as stored by this module. `distinctLineIds` is an optional extra
  * (DESIGN.md §3 allows it) so the daily goal counts DISTINCT lines.
  * `lines` always equals distinctLineIds.length.
+ * `roundsRewarded`: main-line round bonuses paid today (all openings; absent = 0,
+ * docs/practice-structure.md §4.4).
  */
-export type DailyStateX = DailyState & { distinctLineIds?: string[] }
+export type DailyStateX = DailyState & { distinctLineIds?: string[]; roundsRewarded?: number }
 
 export function emptyDaily(date: string): DailyStateX {
   return {

@@ -10,7 +10,10 @@ import type {
   AchievementDef,
   AppData,
   CoinEvent,
+  LapRecord,
+  LapResult,
   LevelInfo,
+  Line,
   LineStats,
   ParentSettings,
   Profile,
@@ -21,15 +24,17 @@ import type {
   RewardDef,
   RewardLine,
 } from '../types.ts'
+import { maxIntervalDaysFor } from '../chess/scheduler.ts'
 import { checkAchievements } from './achievements.ts'
 import type { AchievementContext, LineResultInputX } from './achievements.ts'
 import { findItem, itemById } from './catalog.ts'
-import { createProfile, defaultSeedFor, HISTORY_CAP, localDateKey } from './defaults.ts'
+import { addDaysToKey, createProfile, defaultSeedFor, HISTORY_CAP, isDateKey, localDateKey } from './defaults.ts'
 import type { DailyStateX } from './defaults.ts'
 import { levelForXp, levelUpBetween } from './levels.ts'
 import { OPENINGS } from '../data/openings.ts'
 import {
   clampDailyGoal,
+  CLOCK_SKEW_DAYS,
   computeLineReward,
   DAY_MS,
   distinctLineIdsOf,
@@ -42,6 +47,20 @@ import {
   rolloverDaily,
 } from './rewards.ts'
 import type { EngineResult } from './rewards.ts'
+import {
+  inLap,
+  LAP_COINS_PER_LINE,
+  lapOf,
+  lapProgress,
+  medalOf,
+  MEDALS,
+  perfectDaysOf,
+  qualifiedMedal,
+  ROUND_BONUS_PER_LINE,
+  ROUND_BONUSES_PER_DAY,
+  ROUND_CLEAN_BONUS,
+  roundBonusesLeft,
+} from './mastery.ts'
 
 export const WEEK_MS = 7 * DAY_MS
 export const MAX_COIN_ADJUST = 100000
@@ -244,13 +263,59 @@ function emptyReward(): Reward {
   return { coins: 0, breakdown: [], stars: 1, newAchievements: [], levelUp: null, dailyGoalJustMet: false, lineMastered: false }
 }
 
+/** Display name of an opening (for coin history rows). */
+function openingName(openingId: string, rep?: Repertoire | null): string {
+  if (rep && rep.opening && rep.opening.id === openingId) return rep.opening.name
+  return OPENINGS.find((o) => o.id === openingId)?.name ?? openingId
+}
+
 /**
- * Apply a completed line: rewards, line stats (DESIGN.md §1 rule), totals,
- * daily goal + streak, combo, achievements, level-up.
+ * Lap bookkeeping for one completion (docs/practice-structure.md §2.3). A
+ * completion counts when `counts` (2+ stars, not learn-like; any mode, quick
+ * repeats included) and the line is in the opening's lap set. With the opening's
+ * repertoire the lap rolls over once every lap-set id is done; without it the
+ * line is only recorded (the set is unknown: `total` 0, never a rollover).
+ * Null when the completion doesn't count.
+ */
+function lapAfterCompletion(
+  p: Profile,
+  includePlanB: boolean,
+  line: Line,
+  openingId: string,
+  counts: boolean,
+  rep: Repertoire | null | undefined,
+): { record: LapRecord; result: LapResult } | null {
+  if (!counts || !openingId) return null
+  const repHere = rep && rep.opening && rep.opening.id === openingId && Array.isArray(rep.lines) ? rep : null
+  let lapIds: string[] | null = null
+  if (repHere) {
+    lapIds = repHere.lines.filter((l) => inLap(l, includePlanB)).map((l) => l.id)
+    if (!lapIds.includes(line.id)) return null
+  } else if (!inLap(line, includePlanB)) {
+    return null
+  }
+  const rec = lapOf(p, openingId)
+  const done = rec.done.includes(line.id) ? rec.done : [...rec.done, line.id]
+  if (!lapIds) {
+    return { record: { n: rec.n, done }, result: { openingId, n: rec.n, done: done.length, total: 0, completed: false, coins: 0 } }
+  }
+  const prog = lapProgress({ ...p, laps: { ...p.laps, [openingId]: { n: rec.n, done } } }, openingId, lapIds)
+  const completed = prog.total > 0 && prog.done === prog.total
+  const coins = completed ? LAP_COINS_PER_LINE * prog.total : 0
+  return {
+    record: completed ? { n: rec.n + 1, done: [] } : { n: rec.n, done },
+    result: { openingId, n: rec.n, done: prog.done, total: prog.total, completed, coins },
+  }
+}
+
+/**
+ * Apply a completed line: rewards, line stats (DESIGN.md §1 rule, review gap
+ * capped per tier), totals, daily goal + streak, combo, main-line medal, lap,
+ * achievements, level-up (docs/practice-structure.md §3–§4).
  *
- * `reward.coins` is the TOTAL coins this completion earned, including any
- * achievement bonuses; `reward.breakdown` sums to it (achievement chips are
- * labelled "🏅 <name>").
+ * `reward.coins` is the TOTAL coins this completion earned, including medal,
+ * lap and achievement bonuses; `reward.breakdown` sums to it (achievement chips
+ * are labelled "🏅 <name>").
  */
 export function applyLineResult(
   data: AppData,
@@ -274,11 +339,12 @@ export function applyLineResult(
   const xpBefore = p.xp
   const r = computeLineReward(input, p, data.parent.dailyGoalLines)
 
-  // Line stats
+  // Line stats. The longest review gap depends on the tier (main 7 days, key 12, others 16).
   let newStats: LineStats = nextLineStats(
     prevStats,
     { mistakes: input.mistakes, hintsUsed: input.hintsUsed, usedArrowHint: input.usedArrowHint, learnMode: input.learnMode },
     now,
+    maxIntervalDaysFor(line.tier),
   )
   // A farmed run (quick repeat of a line that isn't due) may lower the box but
   // never makes the line due sooner: otherwise "fail on purpose, then replay"
@@ -295,32 +361,81 @@ export function applyLineResult(
   if (r.learnLike && (!r.farmed || prevStats?.learnPending === true)) newStats.learnPending = true
   // The single full-pay quick retry of a just-failed line has been used.
   if (r.farmed ? prevStats?.quickRetryUsed === true : r.retryOfFail) newStats.quickRetryUsed = true
+  // updateLineStats builds a fresh object: carry the perfect-day record and the medal forward.
+  // An old save has no perfectDays: its estimate (min(perfects, box), from the box BEFORE this
+  // run) is written now, so a failed run that drops the box can't shrink it.
+  if (prevStats) {
+    newStats.perfectDays = perfectDaysOf(prevStats)
+    if (isDateKey(prevStats.lastPerfectDay)) newStats.lastPerfectDay = prevStats.lastPerfectDay
+    const m = medalOf(prevStats)
+    if (m > 0) newStats.medal = m as 1 | 2 | 3
+  }
+  // A perfect run (not learn mode; quick repeats included) on a new local day
+  // adds a perfect day. A day already counted, or one up to CLOCK_SKEW_DAYS
+  // ahead (clock moved back), doesn't count again; a date further ahead is a
+  // wrong clock and gets replaced.
+  if (r.perfect) {
+    const today = localDateKey(now)
+    const last = prevStats?.lastPerfectDay
+    const alreadyCounted = isDateKey(last) && last >= today && last <= addDaysToKey(today, CLOCK_SKEW_DAYS)
+    if (!alreadyCounted) {
+      newStats.perfectDays = perfectDaysOf(prevStats) + 1
+      newStats.lastPerfectDay = today
+    }
+  }
+  // Main-line medal (§3.2): evaluated on every completion of a main line (quick
+  // repeats included), paid once per level, never taken away.
+  const medalChips: RewardLine[] = []
+  const medalsPaid: Array<(typeof MEDALS)[number]> = []
+  let medal: Reward['medal']
+  if (line.tier === 'main') {
+    const had = medalOf(newStats)
+    const q = qualifiedMedal(newStats)
+    if (q > had) {
+      let coins = 0
+      for (const m of MEDALS) {
+        if (m.level <= had || m.level > q) continue
+        coins += m.coins
+        medalsPaid.push(m)
+        medalChips.push({ label: `${m.name} medal`, coins: m.coins, emoji: m.emoji })
+      }
+      newStats.medal = q as 1 | 2 | 3
+      medal = { level: q as 1 | 2 | 3, coins }
+    }
+  }
+  const medalCoins = medal?.coins ?? 0
   const lineMastered = !isLineMastered(prevStats) && isLineMastered(newStats)
+
+  // Lap (§2.3): 2+ stars, not learn-like, any mode (quick repeats count too).
+  const openingId = input.openingId || line.openingId
+  const lap = lapAfterCompletion(p, data.parent.includePlanB !== false, line, openingId, r.stars >= 2 && !r.learnLike, rep)
+  const lapCoins = lap?.result.coins ?? 0
 
   // Totals. Farmed runs (quick repeats of a line just done well) pay a flat 2
   // coins and count toward nothing else: not lines/perfects (→ achievements),
-  // not bestCombo, not today's perfects.
+  // not bestCombo, not today's perfects. (Spread first: keeps rounds / laps.)
   const counts = !r.farmed
   const perfectCounted = r.perfect && counts
   const t = p.totals
-  const totals = {
+  const totals: Profile['totals'] = {
+    ...t,
     lines: nonNegInt(t.lines) + (counts ? 1 : 0),
     perfects: nonNegInt(t.perfects) + (perfectCounted ? 1 : 0),
     mistakesFixed: nonNegInt(t.mistakesFixed) + nonNegInt(input.mistakes),
     engineWins: nonNegInt(t.engineWins),
     blundersPunished: nonNegInt(t.blundersPunished) + (r.punishedBlunder ? 1 : 0),
   }
+  if (lap?.result.completed) totals.laps = nonNegInt(t.laps) + 1
 
   // Daily
   const d0 = effectiveDaily(p, now)
   const ids = distinctLineIdsOf(d0)
   const distinctLineIds = r.countsTowardGoal ? [...ids, line.id] : ids
-  const openingId = input.openingId || line.openingId
   const daily: DailyStateX = {
     ...d0,
     lines: distinctLineIds.length,
     perfects: nonNegInt(d0.perfects) + (perfectCounted ? 1 : 0),
-    coinsEarned: nonNegInt(d0.coinsEarned) + r.coins,
+    coinsEarned: nonNegInt(d0.coinsEarned) + r.coins + medalCoins + lapCoins,
     goalClaimed: d0.goalClaimed || r.dailyGoalJustMet,
     openingsPracticed: openingId && !d0.openingsPracticed.includes(openingId) ? [...d0.openingsPracticed, openingId] : d0.openingsPracticed,
     distinctLineIds,
@@ -336,7 +451,11 @@ export function applyLineResult(
     streakDays: r.dailyGoalJustMet ? r.streakDays : p.streakDays,
     lastGoalDate: r.dailyGoalJustMet ? localDateKey(now) : p.lastGoalDate,
   }
+  if (lap) p = { ...p, laps: { ...p.laps, [openingId]: lap.record } }
   p = addCoins(p, r.coins, `🎓 ${line.chapterTitle || 'Line'} · ${line.name || 'line'}`, now, true)
+  // One coin-history row per medal, like the chips (a jump to silver pays bronze AND silver).
+  for (const m of medalsPaid) p = addCoins(p, m.coins, `${m.emoji} ${m.name} medal · ${line.chapterTitle || 'Main line'}`, now, true)
+  if (lap && lapCoins > 0) p = addCoins(p, lapCoins, `🌳 Lap ${lap.result.n} complete · ${openingName(openingId, rep)}`, now, true)
 
   // Achievements
   const { profile: p2, unlocked } = unlockAndGrant(p, { now, line: input, rep: rep ?? null })
@@ -349,10 +468,12 @@ export function applyLineResult(
 
   const breakdown: RewardLine[] = [
     ...r.breakdown,
+    ...medalChips,
+    ...(lap && lapCoins > 0 ? [{ label: `Lap ${lap.result.n} complete`, coins: lapCoins, emoji: '🌳' }] : []),
     ...unlocked.map((a) => ({ label: `🏅 ${a.name}`, coins: a.coins, emoji: a.emoji })),
   ]
   const reward: Reward = {
-    coins: r.coins + achCoins,
+    coins: r.coins + medalCoins + lapCoins + achCoins,
     breakdown,
     stars: r.stars,
     newAchievements: unlocked,
@@ -360,7 +481,130 @@ export function applyLineResult(
     dailyGoalJustMet: r.dailyGoalJustMet,
     lineMastered,
   }
+  if (medal) reward.medal = medal
+  if (lap) reward.lap = lap.result
   return { data: withProfile(data, p), reward, ok: true, duplicate: false, farmed: r.farmed }
+}
+
+// ---------------------------------------------------------------------------
+// Main-line rounds (docs/practice-structure.md §4.4)
+// ---------------------------------------------------------------------------
+
+export interface MainRoundInput {
+  openingId: string
+  /** The round's startedAt (the app store dedupes on profile|opening|roundId). */
+  roundId: number
+  /** Main lines played in the round (a re-queued line may appear twice; counted once). */
+  lineIds: string[]
+  /** Every line was perfect on its first try. */
+  clean: boolean
+  /** Round time in ms (personal best). */
+  ms: number
+  now: number
+}
+
+export interface MainRoundOutcome {
+  data: AppData
+  ok: boolean
+  coins: number
+  breakdown: RewardLine[]
+  /** false once 3 round bonuses were paid today */
+  bonusPaid: boolean
+  roundsLeftToday: number
+  newBest: boolean
+  bestMs: number | null
+  newAchievements: AchievementDef[]
+  levelUp: { from: LevelInfo; to: LevelInfo } | null
+}
+
+/** Most distinct lines one round can be paid for (the biggest opening has 6 main lines). */
+export const MAX_ROUND_LINES = 30
+
+function bestRoundMs(p: Profile, openingId: string): number | null {
+  const b = p.mainRoundBest
+  const v = b && Object.prototype.hasOwnProperty.call(b, openingId) ? b[openingId] : undefined
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null
+}
+
+/**
+ * A finished main-line round: totals.rounds (+ cleanRounds), the personal best
+ * (clean and faster rounds only, no coins), and the round bonus (2 coins per
+ * distinct main line, +10 when clean) for the first ROUND_BONUSES_PER_DAY rounds
+ * a day, all openings together. The lines themselves were already paid by
+ * applyLineResult. With the opening's repertoire only its main lines count.
+ * Runs the achievement check (with the repertoire). `coins` includes
+ * achievement bonuses; `breakdown` sums to it. No dedupe here: the app store
+ * dedupes on profile|opening|roundId.
+ */
+export function applyMainRound(data: AppData, profileId: string, input: MainRoundInput, rep?: Repertoire | null): MainRoundOutcome {
+  const p0 = getProfile(data, profileId)
+  const now = input && typeof input.now === 'number' ? input.now : NaN
+  const failed = (): MainRoundOutcome => ({
+    data,
+    ok: false,
+    coins: 0,
+    breakdown: [],
+    bonusPaid: false,
+    roundsLeftToday: p0 && Number.isFinite(now) ? roundBonusesLeft(p0, now) : 0,
+    newBest: false,
+    bestMs: p0 && input && typeof input.openingId === 'string' ? bestRoundMs(p0, input.openingId) : null,
+    newAchievements: [],
+    levelUp: null,
+  })
+  if (!p0 || !input || typeof input.openingId !== 'string' || !input.openingId || !Number.isFinite(now)) return failed()
+  if (typeof input.roundId !== 'number' || !Number.isFinite(input.roundId) || !Array.isArray(input.lineIds)) return failed()
+  const openingId = input.openingId
+  let ids = Array.from(new Set(input.lineIds.filter((x): x is string => typeof x === 'string' && x !== '')))
+  if (rep && rep.opening && rep.opening.id === openingId && Array.isArray(rep.lines)) {
+    const mains = new Set(rep.lines.filter((l) => l.tier === 'main').map((l) => l.id))
+    ids = ids.filter((id) => mains.has(id))
+  }
+  const n = Math.min(ids.length, MAX_ROUND_LINES)
+  if (n === 0) return failed()
+  const clean = input.clean === true
+  const ms = typeof input.ms === 'number' && Number.isFinite(input.ms) && input.ms > 0 ? Math.round(input.ms) : 0
+
+  let p = ensureDaily(p0, now)
+  const xpBefore = p.xp
+  const daily = p.daily as DailyStateX
+  const paidToday = nonNegInt(daily.roundsRewarded)
+  const bonusPaid = paidToday < ROUND_BONUSES_PER_DAY
+  const breakdown: RewardLine[] = []
+  if (bonusPaid) {
+    breakdown.push({ label: `Round bonus · ${n} ${n === 1 ? 'line' : 'lines'}`, coins: ROUND_BONUS_PER_LINE * n, emoji: '⭐' })
+    if (clean) breakdown.push({ label: 'Clean sweep', coins: ROUND_CLEAN_BONUS, emoji: '🧹' })
+  }
+  const bonus = breakdown.reduce((s, b) => s + b.coins, 0)
+
+  const t = p.totals
+  p = { ...p, totals: { ...t, rounds: nonNegInt(t.rounds) + 1, cleanRounds: nonNegInt(t.cleanRounds) + (clean ? 1 : 0) } }
+  const prevBest = bestRoundMs(p, openingId)
+  const newBest = clean && ms > 0 && (prevBest === null || ms < prevBest)
+  if (newBest) p = { ...p, mainRoundBest: { ...p.mainRoundBest, [openingId]: ms } }
+  if (bonusPaid) {
+    p = { ...p, daily: { ...daily, roundsRewarded: paidToday + 1, coinsEarned: nonNegInt(daily.coinsEarned) + bonus } as DailyStateX }
+    p = addCoins(p, bonus, `⭐ Main-line round · ${openingName(openingId, rep)}`, now, true)
+  }
+
+  const { profile: p2, unlocked } = unlockAndGrant(p, { now, rep: rep ?? null })
+  p = p2
+  const achCoins = unlocked.reduce((s, a) => s + a.coins, 0)
+  if (achCoins > 0) {
+    const dd = p.daily as DailyStateX
+    p = { ...p, daily: { ...dd, coinsEarned: nonNegInt(dd.coinsEarned) + achCoins } as DailyStateX }
+  }
+  return {
+    data: withProfile(data, p),
+    ok: true,
+    coins: bonus + achCoins,
+    breakdown: [...breakdown, ...unlocked.map((a) => ({ label: `🏅 ${a.name}`, coins: a.coins, emoji: a.emoji }))],
+    bonusPaid,
+    roundsLeftToday: roundBonusesLeft(p, now),
+    newBest,
+    bestMs: newBest ? ms : prevBest,
+    newAchievements: unlocked,
+    levelUp: levelUpBetween(xpBefore, p.xp),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -924,6 +1168,13 @@ export function toggleExtra(data: AppData, chapterId: string, on?: boolean): OpR
 export function setDailyGoal(data: AppData, n: number): OpResult {
   if (!Number.isFinite(n) || n < 1 || n > 50) return fail(data, 'invalid')
   return { data: withParent(data, { dailyGoalLines: Math.floor(n) }), ok: true }
+}
+
+/** Plan B lines in laps on/off (docs/practice-structure.md §5.5). Absent = on. */
+export function setIncludePlanB(data: AppData, on: boolean): OpResult {
+  if (typeof on !== 'boolean') return fail(data, 'invalid')
+  if ((data.parent.includePlanB !== false) === on) return { data, ok: true }
+  return { data: withParent(data, { includePlanB: on }), ok: true }
 }
 
 export const MAX_STUDY_PGN_CHARS = 4_000_000

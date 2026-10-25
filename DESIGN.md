@@ -338,6 +338,7 @@ Navigation is a tiny state machine (`Screen` in types.ts) via `src/app/nav.tsx`
    repetition — default); **"📚 All lines in order"** (shows "Line 7 of 42 · Continue / Start over");
    **"🎯 Pick a chapter"** list (each with mastery bar, lines count; tap → that chapter in order);
    toggle **"👀 Show me the moves"** (learn mode, fewer coins); "🤖 Play this opening vs computer".
+   *Now:* the in-order card is replaced by the ⭐ Main Lines and 🌳 Lap cards — see §9.
 4. **Trainer** — big board + side panel (landscape) / panel under board (portrait):
    chapter + line name (+ ✨NEW / 🧠 review badge), progress dots for the user's moves
    (pending/clean ✓/fixed), Hoot's speech bubble with the coach comment of the current node
@@ -399,3 +400,26 @@ Wave 2 (parallel): **train** → `src/trainer/useTrainer.ts`, `src/screens/Train
 **play** → `src/screens/PlayComputer.tsx`.
 Wave 3: **integrate** → `src/App.tsx`, `src/main.tsx`, `src/app/nav.tsx`, `index.html`,
 `public/manifest.webmanifest`, `public/icons/*`.
+
+## 9. Practice structure (main lines first, every line many times)
+
+The full spec is [`docs/practice-structure.md`](docs/practice-structure.md); it is authoritative.
+In short:
+
+- **Tiers** (`src/chess/lineTiers.ts`, computed on every build, never stored, never part of a line
+  id): ⭐ `main` (no deviation from the chapter's first choice), 🔑 `key` (one opponent deviation),
+  🌿 `deep` (2+ opponent deviations), 🅱️ `planb` (the kid plays the coach's second choice).
+- **Opening screen**: ▶ Coach's Choice (spaced repetition by tier, 35/40/25, never Plan B; the
+  picked line is pinned), ⭐ **Main Lines** card → a timed *round* of every main line (mistakes
+  re-queued once; compact result cards; 3 round bonuses per player per day; best time per opening;
+  🥉🥈🥇 medals per main line), 🌳 **All Lines · Lap N** card → every line once per lap
+  (deep / Plan B lines start at their branch once the parent is mastered), 🎯 Pick a chapter.
+  The "📚 All lines in order" card of §6.3 is gone (the `inorder` mode stays in code, no button).
+- **Ring**: 🏆 Tournament ready % = half main-line medals, half mastered key replies (§3.4 there).
+- **Parent zone → Training**: "🅱️ Plan B lines in laps" toggle and the read-only "Practice
+  structure" card (tier counts, main line per chapter, cross-chapter conflicts to ask the coach).
+- **Saved progress**: new fields are optional (`LineStats.perfectDays/lastPerfectDay/medal`,
+  `Profile.laps/mainRoundBest`, `totals.rounds/cleanRounds/laps`, `daily.roundsRewarded`,
+  `ParentSettings.includePlanB`) and kept by the storage allowlists; line ids are unchanged.
+- Tests: `scripts/test-tiers.ts`, additions in `test-scheduler.ts` / `test-trainer.ts` /
+  `test-store.ts`, and `scripts/test-practice-ui.ts` (UI helpers + Opening-screen layout guards).

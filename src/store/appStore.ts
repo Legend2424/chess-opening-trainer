@@ -16,7 +16,7 @@ import type {
 import type { LineResultInputX } from './achievements.ts'
 import * as ops from './profileOps.ts'
 import { addActiveTime as addActiveTimeOp } from './timeSpent.ts'
-import type { EngineGameOutcome, OpError, OpResult, ShopResult } from './profileOps.ts'
+import type { EngineGameOutcome, MainRoundInput, MainRoundOutcome, OpError, OpResult, ShopResult } from './profileOps.ts'
 import type { EngineResult } from './rewards.ts'
 import {
   auxGet,
@@ -118,6 +118,7 @@ function replaceAll(d: AppData): void {
   const keepActive = cur.activeProfileId && d.profiles.some((p) => p.id === cur.activeProfileId) ? cur.activeProfileId : null
   lastLine = null
   engineGames.clear()
+  mainRounds.clear()
   storeEpoch++
   const now = Date.now()
   const next = ops.trackClock(
@@ -322,6 +323,10 @@ let lastLine: { key: string; reward: LineReward } | null = null
 const engineGames = new Map<string, Plain<EngineGameOutcome>>()
 const ENGINE_GAMES_REMEMBERED = 50
 
+/** Recently applied main-line rounds by `${profileId}|${openingId}|${roundId}` (double-submit protection). */
+const mainRounds = new Map<string, Plain<MainRoundOutcome>>()
+const MAIN_ROUNDS_REMEMBERED = 50
+
 export interface SimpleResult {
   ok: boolean
   error?: OpError | string
@@ -389,6 +394,38 @@ export const actions = {
     if (key !== null && out.ok) {
       engineGames.set(key, out)
       if (engineGames.size > ENGINE_GAMES_REMEMBERED) engineGames.delete(engineGames.keys().next().value as string)
+    }
+    return out
+  },
+  /**
+   * A finished main-line round (docs/practice-structure.md §4.4) for the active
+   * player: round bonus (first 3 rounds a day), totals, best time, achievements.
+   * `input.roundId` is the round's startedAt: a second call for the same
+   * player + opening + roundId returns the first outcome and changes nothing.
+   */
+  applyMainRound(input: MainRoundInput, rep?: Repertoire | null): Plain<MainRoundOutcome> {
+    const d = getAppData()
+    const id = d.activeProfileId
+    if (!id || !input) {
+      return {
+        ok: false,
+        coins: 0,
+        breakdown: [],
+        bonusPaid: false,
+        roundsLeftToday: 0,
+        newBest: false,
+        bestMs: null,
+        newAchievements: [],
+        levelUp: null,
+      }
+    }
+    const key = `${id}|${String(input.openingId)}|${String(input.roundId)}`
+    const seen = mainRounds.get(key)
+    if (seen) return seen
+    const out = run(ops.applyMainRound(d, id, input, rep))
+    if (out.ok) {
+      mainRounds.set(key, out)
+      if (mainRounds.size > MAIN_ROUNDS_REMEMBERED) mainRounds.delete(mainRounds.keys().next().value as string)
     }
     return out
   },
@@ -591,6 +628,11 @@ export const actions = {
     touchParent()
     return run(ops.setDailyGoal(getAppData(), lines))
   },
+  /** Plan B lines in laps (Parent zone → Training). On by default. */
+  setIncludePlanB(on: boolean): SimpleResult {
+    touchParent()
+    return run(ops.setIncludePlanB(getAppData(), on))
+  },
 
   // --- parent: profiles ------------------------------------------------
   renameProfile(profileId: string, name: string): SimpleResult {
@@ -604,6 +646,7 @@ export const actions = {
   resetProfile(profileId: string): SimpleResult {
     touchParent()
     lastLine = null
+    mainRounds.clear()
     storeEpoch++
     return run(ops.resetProfile(getAppData(), profileId, Date.now()))
   },

@@ -1,10 +1,20 @@
 import { cx } from '../../components/ui/index.ts'
+import type { UserMoveMark } from '../../trainer/trainerReducer.ts'
+
+/** A mark the kid plays (a branch start's 'skip' marks are left out by the caller). */
+export type PlayedMark = Exclude<UserMoveMark, 'skip'>
 
 export interface ProgressDotsProps {
-  marks: ('pending' | 'clean' | 'fixed')[]
-  /** Index of the user move being played now (pulses); -1 for none. */
+  /** Only the moves to play: no 'skip' marks (see playedMarks). */
+  marks: readonly PlayedMark[]
+  /** Index in `marks` of the user move being played now (pulses); -1 for none. */
   current: number
   className?: string
+}
+
+/** The marks of the moves the kid plays in this run (a branch start's skipped moves left out). */
+export function playedMarks(marks: readonly UserMoveMark[]): PlayedMark[] {
+  return marks.filter((m): m is PlayedMark => m !== 'skip')
 }
 
 /** One dot per user move: pending (empty), clean ✓ (green), fixed ↺ (amber). */

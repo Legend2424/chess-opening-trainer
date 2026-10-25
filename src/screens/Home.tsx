@@ -11,6 +11,8 @@ import { formatDuration, timeSummary } from '../store/timeSpent.ts'
 import { OPENINGS } from '../data/openings.ts'
 import { useRepertoires } from '../chess/useRepertoires.ts'
 import { openingProgress } from '../chess/scheduler.ts'
+import { tierOf } from '../chess/lineTiers.ts'
+import { readiness, type Readiness } from '../store/mastery.ts'
 import { Button, Card, Chip, ProgressBar, ProgressRing, SpeechBubble, cx } from '../components/ui/index.ts'
 import { Banner, PlayerTopBar, SaveErrorBanner, plural, useNow } from './meta/common.tsx'
 import './Home.css'
@@ -57,13 +59,19 @@ function HomeView({ onRetry }: { onRetry: () => void }) {
   const goal = dailyGoalProgress(profile, now, parent.dailyGoalLines)
   const streak = currentStreak(profile, now)
 
-  // Totals across openings for Hoot's message.
+  // Totals across openings for Hoot's message. "To review" counts only the lines Coach's
+  // Choice serves (not Plan B); the ring is 🏆 Tournament ready (docs/practice-structure.md §5.2).
   let dueTotal = 0
-  const progress: Record<string, ReturnType<typeof openingProgress> | undefined> = {}
+  const progress: Record<string, OpeningCardProgress | undefined> = {}
   for (const rep of repState.reps) {
     const p = openingProgress(rep.lines, profile.lineStats, now)
-    progress[rep.opening.id] = p
-    dueTotal += p.due
+    const coachDue = openingProgress(
+      rep.lines.filter((l) => tierOf(l) !== 'planb'),
+      profile.lineStats,
+      now,
+    ).due
+    progress[rep.opening.id] = { ...p, due: coachDue, ready: readiness(rep.lines, profile.lineStats) }
+    dueTotal += coachDue
   }
 
   const pending = profile.redemptions.filter((r) => r.status === 'pending')
@@ -247,24 +255,36 @@ function GoalCard({ done, goal, met, streak, todayMs }: { done: number; goal: nu
   )
 }
 
+interface OpeningCardProgress {
+  total: number
+  seen: number
+  mastered: number
+  /** Lines to review today that Coach's Choice serves (Plan B left out). */
+  due: number
+  percentMastered: number
+  ready: Readiness
+}
+
 interface OpeningCardProps {
   opening: OpeningDef
   index: number
   status: 'loading' | 'ready' | 'error'
-  progress?: { total: number; seen: number; mastered: number; due: number; percentMastered: number }
+  progress?: OpeningCardProgress
   chapters?: number
   onOpen: () => void
 }
 
 function OpeningCard({ opening, index, status, progress, chapters, onOpen }: OpeningCardProps) {
   const style = { '--op-accent': opening.accent, '--i': index } as CSSProperties
-  const pct = progress?.percentMastered ?? 0
+  // The ring: 🏆 Tournament ready (main-line medals + mastered key replies).
+  const pct = progress?.ready.percent ?? 0
+  const isReady = !!progress?.ready.ready
   const fresh = progress ? progress.total - progress.seen : 0
   const allDone = !!progress && progress.total > 0 && progress.mastered === progress.total
   // "You play Black against 1.e4" -> "against 1.e4" (the side is already on the chip).
   const tag = opening.tagline.replace(/^you play (white|black)\s*[:,-]?\s*/i, '').trim()
   return (
-    <Card className="home-op anim-slide-up anim-delay" style={style} padding="none" onClick={onOpen} aria-label={`${opening.name}, ${pct}% mastered`}>
+    <Card className="home-op anim-slide-up anim-delay" style={style} padding="none" onClick={onOpen} aria-label={`${opening.name}, ${pct}% tournament ready`}>
       <div className="home-op__band" aria-hidden>
         <span className="home-op__emoji">{opening.emoji}</span>
       </div>
@@ -294,7 +314,17 @@ function OpeningCard({ opening, index, status, progress, chapters, onOpen }: Ope
               {fresh} new
             </Chip>
           )}
-          {allDone && <Chip tone="solid" icon="🏆">All mastered!</Chip>}
+          {isReady ? (
+            <Chip tone="solid" icon="🏆">
+              Tournament ready!
+            </Chip>
+          ) : (
+            allDone && (
+              <Chip tone="solid" icon="🏆">
+                All mastered!
+              </Chip>
+            )
+          )}
         </div>
         {progress && progress.total > 0 && (
           <ProgressBar
@@ -318,13 +348,13 @@ function OpeningCard({ opening, index, status, progress, chapters, onOpen }: Ope
         </div>
       </div>
       <div className="home-op__ring">
-        <ProgressRing value={pct / 100} size={86} color={opening.accent} trackColor="rgba(36, 31, 77, 0.08)" ariaLabel={`${pct}% mastered`}>
+        <ProgressRing value={pct / 100} size={86} color={opening.accent} trackColor="rgba(36, 31, 77, 0.08)" ariaLabel={`${pct}% tournament ready`}>
           <span className="home-op__pct">
             <span>
               {pct}
               <small>%</small>
             </span>
-            <em>mastered</em>
+            <em>🏆 ready</em>
           </span>
         </ProgressRing>
       </div>

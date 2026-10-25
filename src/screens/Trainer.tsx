@@ -15,11 +15,14 @@ import { ChessBoard } from '../components/ChessBoard.tsx'
 import { Button, Chip, Modal, TopBar, cx } from '../components/ui/index.ts'
 import { expectedNode, shownNode, tailPending, userMoveIndex } from '../trainer/trainerReducer.ts'
 import { useTrainer } from '../trainer/useTrainer.ts'
+import { TIER_META } from '../chess/lineTiers.ts'
 import { CoachBubble, type ForkInfo } from './trainer/CoachBubble.tsx'
-import { ProgressDots } from './trainer/ProgressDots.tsx'
+import { ProgressDots, playedMarks } from './trainer/ProgressDots.tsx'
 import { MoveList } from './trainer/MoveList.tsx'
-import { LineCompleteModal } from './trainer/LineCompleteModal.tsx'
-import { displayLineName } from './trainer/messages.ts'
+import { LineCompleteModal, needsFullCard } from './trainer/LineCompleteModal.tsx'
+import { RoundCompleteModal } from './trainer/RoundCompleteModal.tsx'
+import { LEAVE_ROUND_LINE, REQUEUE_LINE, displayLineName } from './trainer/messages.ts'
+import { formatClock, lineNameBesideTier } from './trainer/practice.ts'
 import './Trainer.css'
 
 type TrainParams = Extract<Screen, { name: 'train' }>
@@ -28,6 +31,24 @@ const NO_ARROWS: Arrow[] = []
 const NO_HIGHLIGHTS: Highlight[] = []
 /** From this many of the kid's own moves played, Restart asks for a second tap. */
 const RESTART_CONFIRM_FROM = 2
+/** Main-line round: the compact result card goes on by itself after this long. */
+const ROUND_AUTO_NEXT_MS = 2500
+
+/** "⏱ 2:41" — ticks once a second on its own (the board doesn't re-render with it). */
+function RoundClock({ startedAt, doneMs }: { startedAt: number; doneMs: number | null }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (doneMs !== null) return
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [doneMs])
+  const ms = doneMs ?? Math.max(0, now - startedAt)
+  return (
+    <span className="trainer__clock num" role="timer" aria-label={`Round time ${formatClock(ms)}`}>
+      ⏱ {formatClock(ms)}
+    </span>
+  )
+}
 
 export default function Trainer({ params }: { params: TrainParams }) {
   const nav = useNav()
@@ -125,20 +146,53 @@ export default function Trainer({ params }: { params: TrainParams }) {
     const tm = window.setTimeout(() => setArmedFor(null), 3000)
     return () => window.clearTimeout(tm)
   }, [armedFor])
+  // The kid's own moves played in this run (a branch start's skipped moves don't count).
+  const movesPlayed = state ? userMoveIndex(state) - t.skippedUserMoves : 0
   const onRestartTile = () => {
     if (!state) return
-    if (userMoveIndex(state) < RESTART_CONFIRM_FROM || restartArmed) {
+    if (movesPlayed < RESTART_CONFIRM_FROM || restartArmed) {
       setArmedFor(null)
       t.restart()
     } else setArmedFor(restartKey)
   }
 
+  // ---- main-line round ---------------------------------------------------------------
+  const round = t.round
+  const inRound = params.mode === 'main'
+  const [roundOpen, setRoundOpen] = useState(false)
+  // Coins the lines of the current round earned (for the round-complete card).
+  const roundCoins = useRef<{ roundId: number; coins: number; seen: number }>({ roundId: -1, coins: 0, seen: -1 })
+  useEffect(() => {
+    const o = t.outcome
+    if (!inRound || !o || !round) return
+    const rc = roundCoins.current
+    if (rc.seen === o.id) return
+    const base = rc.roundId === round.startedAt ? rc.coins : 0
+    roundCoins.current = { roundId: round.startedAt, coins: base + Math.max(0, o.reward.coins), seen: o.id }
+  }, [inRound, t.outcome, round])
+  /** Leaving now would abandon a round that is under way (finished lines still count). */
+  const roundUnderWay = inRound && !!round && !round.result && !!state && (round.pos > 0 || state.phase === 'complete' || movesPlayed >= 1)
+
   // ---- navigation ------------------------------------------------------------------
-  // Leaving a few moves into a line asks first (it starts again from move 1 next time).
+  // Leaving a few moves into a line (or a round under way) asks first.
   const [askLeave, setAskLeave] = useState(false)
   const exit = () => {
-    if (state && state.phase !== 'complete' && userMoveIndex(state) >= RESTART_CONFIRM_FROM) setAskLeave(true)
+    if (roundUnderWay) setAskLeave(true)
+    else if (state && state.phase !== 'complete' && movesPlayed >= RESTART_CONFIRM_FROM) setAskLeave(true)
     else nav.back()
+  }
+  /** "Next": in a round, the last line opens the round results instead. */
+  const onNext = () => {
+    if (inRound && t.outcome?.roundDone && round?.result) {
+      t.closeComplete()
+      setRoundOpen(true)
+      return
+    }
+    t.nextLine()
+  }
+  const anotherRound = () => {
+    setRoundOpen(false)
+    t.newRound()
   }
   const playOn = () => {
     if (!def) return
@@ -245,14 +299,33 @@ export default function Trainer({ params }: { params: TrainParams }) {
     chapterTitle = chapters.size <= 1 ? line.chapterTitle : 'Mystery line ❓'
     lineName = ''
   }
-  const current = phase === 'complete' ? -1 : userMoveIndex(state)
-  const doneMoves = state.userMoveMarks.filter((m) => m !== 'pending').length
+  // A branch start played the first moves for the kid: dots and count show only the moves to play.
+  const marks = playedMarks(state.userMoveMarks)
+  const current = phase === 'complete' ? -1 : userMoveIndex(state) - t.skippedUserMoves
+  const doneMoves = marks.filter((m) => m !== 'pending').length
   const showTotal = !mystery || state.candidates.length <= 1
+  const tier = TIER_META[line.tier ?? 'deep']
+  // Beside the tier chip, "Main line" would just repeat it ("… · Main line ⭐ Main line").
+  if (!mystery) lineName = lineNameBesideTier(lineName, line.tier)
 
   let modeLabel: string
   if (params.mode === 'random') modeLabel = "🎲 Coach's Choice"
+  else if (params.mode === 'main') {
+    modeLabel = round
+      ? `⭐ ${round.pos >= round.size ? 'Fix-up' : 'Main lines'} · ${Math.min(round.pos + 1, round.order.length)}/${round.order.length}`
+      : '⭐ Main lines'
+  } else if (params.mode === 'lap') modeLabel = t.lap ? `🌳 Lap ${t.lap.n} · ${t.lap.done}/${t.lap.total}` : '🌳 Lap'
   else if (t.lineIndex >= 0) modeLabel = `${params.mode === 'chapter' ? '🎯' : '📚'} Line ${t.lineIndex + 1} of ${t.pool.length}`
   else modeLabel = params.mode === 'chapter' ? '🎯 Chapter' : '📚 In order'
+
+  // Main-line round: the compact card, unless something special happened; a line that
+  // goes to the end of the round says so.
+  const outcome = t.outcome
+  const lineVariant = inRound && outcome && !needsFullCard(outcome) ? 'compact' : 'full'
+  let lineNote: string | undefined
+  if (inRound && outcome && round && !outcome.perfect && round.requeued.includes(outcome.line.id) && round.order.indexOf(outcome.line.id) === round.pos) {
+    lineNote = REQUEUE_LINE
+  }
 
   const hintPips = (
     <span className="trainer__pips" aria-hidden>
@@ -284,6 +357,30 @@ export default function Trainer({ params }: { params: TrainParams }) {
         <Button variant="primary" size="lg" pulse icon="↩" className="trainer__takeback" onClick={t.takeBack}>
           Take it back
         </Button>
+      </div>
+    )
+  } else if (phase === 'complete' && inRound) {
+    // No "Try again" or "Play on" during a round.
+    controls = (
+      <div className="trainer__controls trainer__controls--tiles trainer__controls--two">
+        {t.outcome?.roundDone ? (
+          <Button variant="primary" size="md" shine icon="🏁" onClick={onNext}>
+            Results
+          </Button>
+        ) : (
+          <Button variant="primary" size="md" shine icon="▶" onClick={onNext}>
+            Next
+          </Button>
+        )}
+        {t.outcome?.roundDone ? (
+          <Button variant="secondary" size="md" icon="←" onClick={() => nav.back()}>
+            Back
+          </Button>
+        ) : (
+          <Button variant="secondary" size="md" icon="🚪" onClick={() => setAskLeave(true)}>
+            End round
+          </Button>
+        )}
       </div>
     )
   } else if (phase === 'complete') {
@@ -366,6 +463,7 @@ export default function Trainer({ params }: { params: TrainParams }) {
           <div className="trainer__head">
             <div className="trainer__head-top">
               <span className="trainer__mode">{modeLabel}</span>
+              {inRound && round && <RoundClock key={round.startedAt} startedAt={round.startedAt} doneMs={round.result ? round.result.ms : null} />}
               <span className="spacer" />
               {/* ⚡ for the combo: 🔥 is the daily streak (top bar). */}
               <span
@@ -393,6 +491,12 @@ export default function Trainer({ params }: { params: TrainParams }) {
                   <span className="trainer__line-name">{lineName}</span>
                 </>
               )}
+              {/* Coach's Choice keeps the tier a mystery too, until the line is complete. */}
+              {!mystery && (
+                <Chip tone="violet" icon={tier.emoji} className="trainer__badge trainer__tier">
+                  {tier.name}
+                </Chip>
+              )}
               {isNew && (
                 <Chip tone="gold" icon="✨" className="trainer__badge">
                   NEW
@@ -411,8 +515,8 @@ export default function Trainer({ params }: { params: TrainParams }) {
             </div>
             <div className="trainer__progress">
               {/* While the robot can still pick a longer or shorter line, don't show how many moves are left. */}
-              <ProgressDots marks={showTotal ? state.userMoveMarks : state.userMoveMarks.slice(0, doneMoves + 1)} current={current} />
-              <span className="trainer__count num">{showTotal ? `${doneMoves}/${state.userMoveMarks.length}` : `${doneMoves} ✓`}</span>
+              <ProgressDots marks={showTotal ? marks : marks.slice(0, doneMoves + 1)} current={current} />
+              <span className="trainer__count num">{showTotal ? `${doneMoves}/${marks.length}` : `${doneMoves} ✓`}</span>
             </div>
           </div>
 
@@ -447,18 +551,33 @@ export default function Trainer({ params }: { params: TrainParams }) {
         outcome={t.outcome}
         effect={profile.equipped.effect}
         streak={currentStreak(profile, now)}
-        onNext={t.nextLine}
+        onNext={onNext}
         onRetry={t.restart}
         onPlayOn={playOn}
         onHome={goHome}
         onClose={t.closeComplete}
+        variant={lineVariant}
+        autoNextMs={lineVariant === 'compact' ? ROUND_AUTO_NEXT_MS : undefined}
+        mode={params.mode}
+        onEndRound={() => setAskLeave(true)}
+        stats={outcome ? profile.lineStats[outcome.line.id] : undefined}
+        note={lineNote}
+      />
+
+      <RoundCompleteModal
+        open={inRound && roundOpen && !!round?.result}
+        round={round}
+        lineCoins={round && roundCoins.current.roundId === round.startedAt ? roundCoins.current.coins : 0}
+        effect={profile.equipped.effect}
+        onAgain={anotherRound}
+        onBack={() => nav.back()}
       />
 
       <Modal
         open={askLeave}
         onClose={() => setAskLeave(false)}
         size="sm"
-        title="Leave this line? 🚪"
+        title={roundUnderWay ? 'Leave the round? 🚪' : 'Leave this line? 🚪'}
         footerCenter
         footer={
           <>
@@ -479,9 +598,13 @@ export default function Trainer({ params }: { params: TrainParams }) {
         }
       >
         <p className="trainer__confirm">
-          {params.mode === 'random'
-            ? 'This line stops here — next time Hoot picks a line for you again.'
-            : "You'll start this line again from move 1 next time."}
+          {roundUnderWay
+            ? LEAVE_ROUND_LINE
+            : params.mode === 'random'
+              ? 'This line stops here — next time Hoot picks a line for you again.'
+              : params.mode === 'lap'
+                ? "You'll start this line again next time."
+                : "You'll start this line again from move 1 next time."}
         </p>
       </Modal>
     </div>

@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "build:pages": "tsc -b && vite build --base=/chess-opening-trainer/",
     "preview": "vite preview",
-    "test": "node scripts/test-pgn.ts && node scripts/test-repertoire.ts && node scripts/test-scheduler.ts && node scripts/test-trainer.ts && node scripts/test-store.ts && node scripts/test-uikit.ts"
+    "test": "node scripts/test-pgn.ts && node scripts/test-repertoire.ts && node scripts/test-tiers.ts && node scripts/test-scheduler.ts && node scripts/test-trainer.ts && node scripts/test-store.ts && node scripts/test-uikit.ts && node scripts/test-practice-ui.ts"
   },
   "dependencies": {
     "@fontsource/fredoka": "^5.3.0",

@@ -78,6 +78,19 @@
   text-overflow: ellipsis;
 }
 
+/* Main-line round timer next to "⭐ Main lines · 3/6". */
+.trainer__clock {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--c-primary-50);
+  color: var(--c-ink-2);
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
 .trainer__combo,
 .trainer__session {
   display: inline-flex;
@@ -244,8 +257,29 @@
 
 .coach__headline + .coach__body,
 .coach__headline + .coach__notes,
+.coach__headline + .coach__tag,
+.coach__tag + .coach__notes,
+.coach__tag + .coach__body,
 .coach__notes + .coach__body {
   margin-top: 6px;
+}
+
+/* "🌿 New branch! Instead of 3.exd5 they play 3.e5." */
+.coach__tag {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: var(--c-success-100);
+  color: var(--c-success-700);
+  font-weight: 800;
+  font-size: 0.95em;
+  line-height: 1.35;
+  animation: oq-fade-in 0.4s var(--ease-out) backwards;
+}
+.coach__tag .coach__move {
+  color: var(--c-success-700);
 }
 
 .coach__body {
@@ -315,6 +349,10 @@
 .trainer__controls--tiles {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+/* Main-line round: Next / End round. */
+.trainer__controls--tiles.trainer__controls--two {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
 }
 .trainer__controls--tiles .btn {
   --btn-h: 66px;
@@ -399,6 +437,16 @@
   color: var(--c-error-700);
   text-decoration: line-through;
   text-decoration-thickness: 2px;
+}
+/* Branch start: the moves played for the kid. */
+.mlist__item.is-skipped .mlist__num,
+.mlist__san.is-skipped {
+  color: #b3afcc;
+  font-weight: 500;
+}
+.mlist__san.is-skipped.is-last {
+  background: #efedf7;
+  color: #8f8aae;
 }
 .mlist__empty {
   color: var(--c-muted);
@@ -615,6 +663,7 @@
   font-family: var(--font-head);
   font-weight: 700;
   color: var(--c-gold-700);
+  white-space: nowrap;
 }
 
 .lcm__banners {
@@ -733,7 +782,164 @@
   }
 }
 
+.lcm__line .lcm__tier {
+  min-height: 24px;
+  padding: 1px 9px;
+  font-size: 0.8rem;
+  vertical-align: 1px;
+}
+
+/* Rep #N + next medal (main lines). */
+.lcm__reps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 10px;
+}
+.lcm__medal-next {
+  font-weight: 800;
+  color: var(--c-ink-2);
+}
+
+.lcm__lap {
+  padding: 4px 14px;
+  border-radius: var(--radius-pill);
+  background: var(--c-success-100);
+  color: var(--c-success-700);
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+
+.lcm__banner--medal {
+  background: linear-gradient(90deg, #fff3cc 0%, #fffbea 100%);
+  border: 2px solid #ffd45c;
+}
+.lcm__banner--lap {
+  background: var(--c-success-100);
+  border: 2px solid #86efac;
+}
+
+/* Round buttons: one row, the main action wider. */
+.lcm__actions--row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.lcm__actions--row .btn {
+  flex: 1 1 auto;
+}
+.lcm__actions--row .lcm__grow {
+  flex: 2 1 auto;
+}
+
+/* Compact result card (main-line rounds): goes on by itself. */
+.lcm--compact .lcm__body {
+  gap: 8px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.lcm--compact .lcm__body .stars {
+  margin-top: 4px;
+}
+.lcm--compact .lcm__title {
+  font-size: 1.6rem;
+}
+.lcm__coins.lcm__coins--sm {
+  font-size: 1.8rem;
+  padding: 2px 20px 2px 12px;
+}
+.lcm__auto {
+  width: min(220px, 70%);
+  height: 6px;
+  margin-top: 4px;
+  border-radius: 3px;
+  background: var(--c-primary-100);
+  overflow: hidden;
+}
+.lcm__auto-fill {
+  display: block;
+  height: 100%;
+  width: 100%;
+  border-radius: 3px;
+  background: var(--c-primary);
+  transform-origin: left center;
+  animation: oqt-auto-fill linear forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lcm__auto-fill {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------ round complete */
+.rcm__badge {
+  margin-top: 8px;
+  width: 76px;
+  height: 76px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 46px;
+  line-height: 1;
+  background: radial-gradient(circle at 35% 30%, #fff9e0 0%, #ffd45c 75%);
+  box-shadow:
+    inset 0 0 0 3px #ffc21a,
+    0 4px 0 #e9a400;
+  animation: oqt-pop 0.5s var(--ease-pop) backwards;
+}
+.rcm__time {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 14px;
+}
+.rcm__clock {
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: 2rem;
+  line-height: 1.1;
+  color: var(--c-ink);
+}
+.rcm__best {
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--c-card-2);
+  box-shadow: inset 0 0 0 2px var(--c-line);
+  font-weight: 800;
+  color: var(--c-ink-2);
+}
+.rcm__best.is-new {
+  background: var(--c-gold-100);
+  box-shadow: inset 0 0 0 2px #ffd45c;
+  color: var(--c-gold-ink);
+}
+.rcm__best.is-hint {
+  font-weight: 700;
+  color: var(--c-muted);
+}
+.rcm__left {
+  font-weight: 800;
+  color: var(--c-ink-2);
+}
+.rcm__dots {
+  margin-left: 4px;
+  letter-spacing: 2px;
+  color: var(--c-gold-700);
+}
+
 /* ---------------------------------------------------------------- keyframes */
+@keyframes oqt-auto-fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
 @keyframes oqt-pop {
   0% {
     opacity: 0;

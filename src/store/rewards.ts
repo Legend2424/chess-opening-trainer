@@ -46,12 +46,15 @@ export function canPromote(prev: LineStats | undefined, now: number): boolean {
  * negatives), plus one guard: replaying a line that is NOT due yet can never
  * raise its box or push its review later (so quick "Try again" replays can't
  * master a line in minutes). Mistakes on such a replay still lower the box.
+ * `maxIntervalDays` (the line tier's review cap, scheduler.maxIntervalDaysFor)
+ * is passed through; absent = the scheduler's default (no extra cap).
  */
-export function nextLineStats(prev: LineStats | undefined, r: LineOutcome, now: number): LineStats {
+export function nextLineStats(prev: LineStats | undefined, r: LineOutcome, now: number, maxIntervalDays?: number): LineStats {
   const next = updateLineStats(
     prev,
     { mistakes: nonNegInt(r.mistakes), hintsUsed: nonNegInt(r.hintsUsed), usedArrowHint: !!r.usedArrowHint, learnMode: !!r.learnMode },
     now,
+    maxIntervalDays,
   )
   if (!prev || r.learnMode || canPromote(prev, now)) return next
   const prevBox = boxOf(prev)
@@ -80,6 +83,8 @@ export const STREAK_BONUS_PER_DAY = 5
 export const STREAK_BONUS_MAX_DAYS = 7
 export const FARM_WINDOW_MS = 60 * 60 * 1000
 export const FARM_COINS = 2
+/** Base pay of a branch-start run (lap mode, shared start auto-played): 2 + min(kid moves played, 15). */
+export const BRANCH_BASE_COINS = 2
 /**
  * Clock-skew tolerance. Dates/timestamps up to this far AHEAD of the device
  * clock are kept (so winding the clock back a little can't unlock a second
@@ -188,6 +193,25 @@ export interface LineRewardResult {
   streakDays: number
   /** Opponent blunder punished on a perfect, non-learn run. */
   punishedBlunder: boolean
+  /**
+   * A branch-start run (input.userMovesPlayed below the line's kid moves): pay
+   * follows the kid moves actually played (docs/practice-structure.md §4.2).
+   */
+  branchStart: boolean
+  /** Kid moves the pay is based on: max(1, userMovesPlayed) on a branch start, else line.userMoveCount. */
+  movesPaid: number
+}
+
+/**
+ * Kid moves a run is paid for. A number below the line's kid moves means a
+ * branch-start run (max(1, played)); absent, invalid or >= the line's count =
+ * the whole line (null).
+ */
+export function branchMovesPlayed(input: Pick<LineResultInput, 'line' | 'userMovesPlayed'>): number | null {
+  const played = input.userMovesPlayed
+  if (typeof played !== 'number' || !Number.isFinite(played)) return null
+  if (played >= nonNegInt(input.line.userMoveCount)) return null
+  return Math.max(1, nonNegInt(played))
 }
 
 /**
@@ -205,7 +229,13 @@ export function computeLineReward(input: LineResultInput, profile: Profile, dail
   const stars = starsFor(mistakes, hints, arrow)
   const clean = mistakes === 0 && hints === 0 && !arrow
   const perfect = clean && !learn
-  const learnLike = learn || (arrow && hints >= Math.max(1, nonNegInt(line.userMoveCount)))
+  // Branch-start run (§4.2): every amount follows the kid moves actually played.
+  const branch = branchMovesPlayed(input)
+  const branchStart = branch !== null
+  const moves = branch ?? nonNegInt(line.userMoveCount)
+  /** A bonus chip, capped at the moves played on a branch start. */
+  const capped = (coins: number, cap: number): number => (branchStart ? Math.min(coins, cap) : coins)
+  const learnLike = learn || (arrow && hints >= Math.max(1, moves))
 
   const seenBefore = !!prev && prev.lastPracticed > 0
   // Exact timestamp on purpose (anti-farming): "due later today" is not due here.
@@ -239,26 +269,26 @@ export function computeLineReward(input: LineResultInput, profile: Profile, dail
   if (farmed) {
     breakdown.push({ label: 'Practice makes perfect', coins: FARM_COINS, emoji: '🪙' })
   } else {
-    const base = BASE_COINS + Math.min(nonNegInt(line.userMoveCount), MAX_MOVE_COINS)
+    const base = (branchStart ? BRANCH_BASE_COINS : BASE_COINS) + Math.min(moves, MAX_MOVE_COINS)
     if (learnLike) {
       breakdown.push({ label: 'Learned a line', coins: Math.ceil(base / 2), emoji: '📖' })
     } else {
       breakdown.push({ label: 'Line complete', coins: base, emoji: '🪙' })
-      if (perfect) breakdown.push({ label: 'Perfect!', coins: PERFECT_BONUS, emoji: '⭐' })
-      if (isNewLine) breakdown.push({ label: 'New line', coins: NEW_LINE_BONUS, emoji: '✨' })
+      if (perfect) breakdown.push({ label: 'Perfect!', coins: capped(PERFECT_BONUS, moves), emoji: '⭐' })
+      if (isNewLine) breakdown.push({ label: 'New line', coins: capped(NEW_LINE_BONUS, moves), emoji: '✨' })
       // "Remembered" means recalled after a gap: a line re-done right after
       // failing it is due again immediately, but that is not remembering. Due
       // later today counts (the review is today's).
       if (seenBefore && isDueToday(prev, now) && perfect && !recentlyPracticed) {
-        breakdown.push({ label: 'Remembered it!', coins: REMEMBERED_BONUS, emoji: '🧠' })
+        breakdown.push({ label: 'Remembered it!', coins: capped(REMEMBERED_BONUS, moves), emoji: '🧠' })
       }
       const combo = nonNegInt(input.combo)
       if (perfect && combo >= 3) {
-        breakdown.push({ label: `Combo x${combo}`, coins: combo >= 6 ? BIG_COMBO_BONUS : COMBO_BONUS, emoji: '⚡' })
+        breakdown.push({ label: `Combo x${combo}`, coins: capped(combo >= 6 ? BIG_COMBO_BONUS : COMBO_BONUS, moves), emoji: '⚡' })
       }
       if (perfect && input.opponentBlunderPunished) {
         punishedBlunder = true
-        breakdown.push({ label: 'Punished a blunder', coins: BLUNDER_BONUS, emoji: '⚔️' })
+        breakdown.push({ label: 'Punished a blunder', coins: capped(BLUNDER_BONUS, moves), emoji: '⚔️' })
       }
     }
     if (dailyGoalJustMet) {
@@ -288,6 +318,8 @@ export function computeLineReward(input: LineResultInput, profile: Profile, dail
     dailyGoalJustMet,
     streakDays,
     punishedBlunder,
+    branchStart,
+    movesPaid: moves,
   }
 }
 

@@ -6,12 +6,14 @@
 // MoveNode carries its subtree). It lives in React state + a ref only.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Line, LineStats, Repertoire, TrainerMode } from '../types.ts'
-import { pickLineBalanced } from '../chess/scheduler.ts'
+import type { LapResult, Line, LineStats, LineTier, Repertoire, TrainerMode } from '../types.ts'
+import { pickCoachLine } from '../chess/scheduler.ts'
 import { userColorOf } from '../chess/repertoire.ts'
+import { branchStartPly, lapLines, mainRoundQueue, nextLapLine, tierOf } from '../chess/lineTiers.ts'
 import {
   expectedNode,
   initTrainer,
+  skippedUserMoves,
   trainerReducer,
   type Feedback,
   type PlayedMove,
@@ -19,8 +21,9 @@ import {
   type TrainerContext,
   type TrainerState,
 } from './trainerReducer.ts'
-import { actions, getActiveProfile, getStoreEpoch, type LineReward } from '../store/appStore.ts'
+import { actions, getActiveProfile, getAppData, getStoreEpoch, type LineReward } from '../store/appStore.ts'
 import type { LineResultInputX } from '../store/achievements.ts'
+import type { MainRoundOutcome } from '../store/profileOps.ts'
 import { sfx } from '../fx/sound.ts'
 import { engineStatus, judgeMistake, preloadEngine, stopEngine, type MistakeVerdict } from '../engine/engineService.ts'
 
@@ -58,6 +61,40 @@ export interface LineOutcome {
   carried: boolean
   /** Board position at the end (for "Play on vs computer"). */
   fen: string
+  /** The line's practice tier (docs/practice-structure.md §1). */
+  tier: LineTier
+  /** Kid moves actually played (fewer than line.userMoveCount after a branch start). */
+  userMovesPlayed: number
+  /** Main-line round: this completion finished the round (TrainerApi.round.result is set). */
+  roundDone: boolean
+}
+
+/** ⭐ Main-line round (mode 'main', docs/practice-structure.md §2.2). */
+export interface MainRoundView {
+  /** Play order, including re-queued ids (a non-perfect first try comes back once at the end). */
+  order: string[]
+  /** Index in `order` of the current line. */
+  pos: number
+  /** Distinct main lines in the round. */
+  size: number
+  requeued: string[]
+  firstTryPerfect: string[]
+  /** When the round's first line was set up (epoch ms); also the round id. */
+  startedAt: number
+  /** Set once after the last line. */
+  result: null | { ms: number; clean: boolean; outcome: Omit<MainRoundOutcome, 'data'> }
+}
+
+/** 🌳 Lap progress (mode 'lap', docs/practice-structure.md §2.3). */
+export interface LapView {
+  /** Current lap number (1-based). */
+  n: number
+  /** Lines of the lap set finished in this lap. */
+  done: number
+  total: number
+  includesPlanB: boolean
+  /** The lap the last completion finished (until the next line starts), else null. */
+  justCompleted: LapResult | null
 }
 
 export interface TrainerApi {
@@ -65,7 +102,7 @@ export interface TrainerApi {
   status: 'loading' | 'empty' | 'ready'
   state: TrainerState | null
   pool: Line[]
-  /** In-order / chapter mode: index of the current line in `pool` (-1 in random mode). */
+  /** Index of the current line in `pool` (-1 in random mode). In-order / chapter: the walk position. */
   lineIndex: number
   userColor: 'w' | 'b'
   /** Arrows for every move are shown ("Show me the moves"). */
@@ -96,6 +133,43 @@ export interface TrainerApi {
    * Review badges, so finishing the line doesn't flip them behind the modal).
    */
   runStats: Record<string, LineStats>
+  /** Mode 'main' only: the current round. */
+  round: MainRoundView | null
+  /** Mode 'lap' only: the current lap. */
+  lap: LapView | null
+  /** User moves a branch start played for the kid in this run (0 = from move 1). */
+  skippedUserMoves: number
+  /** Mode 'main': a new round (reshuffled, new startedAt), starting with its first line. */
+  newRound: () => void
+}
+
+interface RoundState extends MainRoundView {
+  /** `pos` whose line was completed (the round moves on at the next line). -1 = none yet. */
+  completedPos: number
+}
+
+function roundView(r: RoundState | null): MainRoundView | null {
+  if (!r) return null
+  return {
+    order: r.order.slice(),
+    pos: r.pos,
+    size: r.size,
+    requeued: r.requeued.slice(),
+    firstTryPerfect: r.firstTryPerfect.slice(),
+    startedAt: r.startedAt,
+    result: r.result,
+  }
+}
+
+/** A fresh round over the main lines of `pool`, shuffled; avoids opening with `avoidLineId`. */
+function newRoundState(pool: readonly Line[], avoidLineId: string | undefined, now: number): RoundState {
+  const order = mainRoundQueue(pool, Math.random).map((l) => l.id)
+  if (avoidLineId !== undefined && order.length > 1 && order[0] === avoidLineId) {
+    const j = 1 + Math.min(order.length - 2, Math.floor(Math.random() * (order.length - 1)))
+    order[0] = order[j]
+    order[j] = avoidLineId
+  }
+  return { order, pos: 0, size: order.length, requeued: [], firstTryPerfect: [], startedAt: now, result: null, completedPos: -1 }
 }
 
 /** Session combo per player; survives leaving the trainer (but not a reload). */
@@ -189,12 +263,21 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
   const orderKey = inOrderKey(openingId, mode, chapterId)
   const sessionKey = `${getActiveProfile()?.id ?? ''}|${orderKey}|${mode}`
 
+  // Laps leave Plan B out when the parent switched it off (absent = on).
+  const includePlanB = getAppData().parent.includePlanB !== false
+
   const pool = useMemo<Line[]>(() => {
     if (!rep) return []
-    return mode === 'chapter' ? rep.lines.filter((l) => l.chapterId === chapterId) : rep.lines
-  }, [rep, mode, chapterId])
+    if (mode === 'chapter') return rep.lines.filter((l) => l.chapterId === chapterId)
+    if (mode === 'main') return rep.lines.filter((l) => tierOf(l) === 'main')
+    if (mode === 'lap') return lapLines(rep.lines, includePlanB)
+    return rep.lines
+  }, [rep, mode, chapterId, includePlanB])
 
-  /** "Try again": the opponent keeps choosing this line while it is still possible. */
+  /**
+   * The opponent keeps choosing this line while it is still possible: the line Coach's Choice picked
+   * (so the opponent's re-picks don't drift into busy subtrees), or the line of a "Try again".
+   */
   const pinnedLineRef = useRef<string | null>(null)
   /** The line just finished: the opponent steers away from it on the next line (unless it's the only one). */
   const avoidLineRef = useRef<string | undefined>(undefined)
@@ -210,8 +293,8 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
           const keep = lines.find((l) => l.id === pinned)
           if (keep) return keep
         }
-        // Chapter first, then a line: a chapter with many lines doesn't crowd out the others.
-        return pickLineBalanced(lines, getActiveProfile()?.lineStats ?? {}, Date.now(), { avoidLineId: avoidLineRef.current })
+        // By tier (main / key replies / deeper), then chapter, then line (docs/practice-structure.md §2.1).
+        return pickCoachLine(lines, getActiveProfile()?.lineStats ?? {}, Date.now(), { avoidLineId: avoidLineRef.current })
       },
     }
   }, [rep])
@@ -238,6 +321,12 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
   const [sessionLines, setSessionLines] = useState(() => resumed?.lines ?? 0)
   const [shake, setShake] = useState(0)
   const [runStats, setRunStats] = useState<Record<string, LineStats>>(() => getActiveProfile()?.lineStats ?? {})
+  /** Main-line round (mode 'main'): the ref is the truth, `round` its copy for rendering. */
+  const roundRef = useRef<RoundState | null>(null)
+  const [round, setRound] = useState<MainRoundView | null>(null)
+  /** Lap mode: lines tried in this session whose completion didn't count (1 star, learn mode). */
+  const skipRef = useRef<Set<string>>(new Set())
+  const [lapJust, setLapJust] = useState<LapResult | null>(null)
   const sessionRef = useRef({ coins: resumed?.coins ?? 0, lines: resumed?.lines ?? 0 })
 
   // Refs: the reducer runs synchronously in event handlers, so the board's
@@ -313,6 +402,8 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
     setInsight(null)
     setOutcome(null)
     setShowComplete(false)
+    // "Lap N complete" belongs to the run that completed it: a new line or a "Try again" clears it.
+    setLapJust(null)
   }, [])
 
   const commit = (next: TrainerState) => {
@@ -320,35 +411,58 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
     setState(next)
   }
 
+  /** Starts a run of `line`; `startPly` > 0 = a branch start (lap mode only, see branchStartPly). */
   const startLine = useCallback(
-    (line: Line, index: number, avoidLineId?: string) => {
+    (line: Line, index: number, avoidLineId?: string, startPly = 0) => {
       const c = ctxRef.current
       if (!c) return
       abandonRun()
       resetRun(line.id)
-      pinnedLineRef.current = null
+      // Coach's Choice follows the line it picked; a kid's other good move still switches line.
+      pinnedLineRef.current = mode === 'random' ? line.id : null
       avoidLineRef.current = avoidLineId
       lineIndexRef.current = index
       setLineIndex(index)
-      commit(initTrainer(line, { mode, learnMode: learnRef.current, userColor }, c))
+      commit(initTrainer(line, { mode, learnMode: learnRef.current, userColor }, c, mode === 'lap' ? startPly : 0))
     },
     [mode, userColor, abandonRun, resetRun],
   )
 
   const chooseLine = useCallback(
-    (avoidLineId?: string): { line: Line; index: number } | null => {
+    (avoidLineId?: string): { line: Line; index: number; startPly: number } | null => {
       const p = poolRef.current
       if (p.length === 0) return null
       const profile = getActiveProfile()
+      const stats = profile?.lineStats ?? {}
       if (mode === 'random') {
-        const line = pickLineBalanced(p, profile?.lineStats ?? {}, Date.now(), { avoidLineId })
-        return { line, index: -1 }
+        const line = pickCoachLine(p, stats, Date.now(), { avoidLineId })
+        return { line, index: -1, startPly: 0 }
+      }
+      if (mode === 'main') {
+        const byId = new Map(p.map((l) => [l.id, l]))
+        let rd = roundRef.current
+        if (rd && !rd.result && rd.completedPos === rd.pos && rd.pos + 1 < rd.order.length) {
+          rd = { ...rd, pos: rd.pos + 1 } // the next line of the round
+        } else if (!rd || rd.result || rd.completedPos === rd.pos || !byId.has(rd.order[rd.pos])) {
+          rd = newRoundState(p, avoidLineId, Date.now()) // the timer starts as the first line is set up
+        } // else: the current line wasn't finished, it is played again
+        const line = byId.get(rd.order[rd.pos])
+        if (!line) return null
+        roundRef.current = rd
+        setRound(roundView(rd))
+        return { line, index: p.indexOf(line), startPly: 0 }
+      }
+      if (mode === 'lap') {
+        const done = new Set(profile?.laps?.[openingId]?.done ?? [])
+        // Everything done (the store rolls the lap over at the next counted completion): from the top.
+        const line = nextLapLine(p, done, skipRef.current) ?? p[0]
+        return { line, index: p.indexOf(line), startPly: branchStartPly(line, stats) }
       }
       const stored = profile?.inOrderIndex[orderKey] ?? 0
       const index = ((Math.floor(stored) % p.length) + p.length) % p.length
-      return { line: p[index], index }
+      return { line: p[index], index, startPly: 0 }
     },
-    [mode, orderKey],
+    [mode, orderKey, openingId],
   )
 
   // ---- completion ------------------------------------------------------------
@@ -370,6 +484,8 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
       const perfect = mistakes === 0 && hintsUsed === 0 && !usedArrowHint && !learn
       const profileId = getActiveProfile()?.id ?? ''
       const comboBefore = sessionCombos.get(profileId) ?? 0
+      // A branch start played the shared start for the kid: pay and count only the moves played.
+      const userMovesPlayed = s.userMoveMarks.filter((m) => m !== 'skip').length
       const input: LineResultInputX = {
         line: s.line,
         openingId: r.opening.id,
@@ -382,6 +498,7 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
         opponentBlunderPunished: s.opponentBlundered,
         now,
         maxMistakesOnOneMove: Math.max(maxMistakesRef.current, carry?.maxHere ?? 0),
+        userMovesPlayed,
       }
       const reward = actions.applyLineResult(input, r)
       syncEpoch()
@@ -389,17 +506,65 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
       const nextCombo = perfect ? (reward.farmed ? comboBefore : comboBefore + 1) : 0
       sessionCombos.set(profileId, nextCombo)
       setCombo(nextCombo)
-      sessionRef.current = { coins: sessionRef.current.coins + reward.coins, lines: sessionRef.current.lines + 1 }
+
+      let wrapped = false
+      const p = poolRef.current
+      // Only the modes that walk the pool in order keep a position (main rounds and laps have their own).
+      if ((mode === 'inorder' || mode === 'chapter') && p.length > 0 && lineIndexRef.current >= 0) {
+        const nextIdx = lineIndexRef.current + 1
+        wrapped = nextIdx >= p.length
+        actions.setInOrderIndex(orderKey, wrapped ? 0 : nextIdx)
+      }
+
+      // Main-line round: a non-perfect first try comes back once at the end; the last line ends the round.
+      let roundDone = false
+      /** Round bonus + round achievements, paid once when this completion ends the round. */
+      let roundCoins = 0
+      const rd = roundRef.current
+      if (mode === 'main' && rd && !rd.result && rd.completedPos !== rd.pos && rd.order[rd.pos] === s.line.id) {
+        const id = s.line.id
+        const order = rd.order.slice()
+        const requeued = rd.requeued.slice()
+        const firstTryPerfect = rd.firstTryPerfect.slice()
+        if (order.indexOf(id) === rd.pos) {
+          if (perfect) firstTryPerfect.push(id)
+          else if (!requeued.includes(id)) {
+            requeued.push(id)
+            order.push(id)
+          }
+        }
+        let result: MainRoundView['result'] = null
+        if (rd.pos >= order.length - 1) {
+          const ms = Math.max(0, now - rd.startedAt)
+          const clean = firstTryPerfect.length === rd.size
+          const lineIds = [...new Set(order)]
+          const outcome = actions.applyMainRound({ openingId: r.opening.id, roundId: rd.startedAt, lineIds, clean, ms, now }, r)
+          result = { ms, clean, outcome }
+          roundDone = true
+          roundCoins = outcome.ok ? Math.max(0, outcome.coins) : 0
+        }
+        const next: RoundState = { ...rd, order, requeued, firstTryPerfect, completedPos: rd.pos, result }
+        roundRef.current = next
+        setRound(roundView(next))
+      }
+
+      // The session chip counts every coin this session paid: the line's reward (medal / lap
+      // bonuses included) and, at the end of a main-line round, the round's coins.
+      sessionRef.current = { coins: sessionRef.current.coins + reward.coins + roundCoins, lines: sessionRef.current.lines + 1 }
       setSessionCoins(sessionRef.current.coins)
       setSessionLines(sessionRef.current.lines)
       lastSession.set(sessionKey, { lineId: s.line.id, ...sessionRef.current, at: now })
 
-      let wrapped = false
-      const p = poolRef.current
-      if (mode !== 'random' && p.length > 0 && lineIndexRef.current >= 0) {
-        const nextIdx = lineIndexRef.current + 1
-        wrapped = nextIdx >= p.length
-        actions.setInOrderIndex(orderKey, wrapped ? 0 : nextIdx)
+      // Lap: a completion that didn't count comes back once nothing else is left in the lap.
+      if (mode === 'lap') {
+        if (!reward.lap) skipRef.current.add(s.line.id)
+        else {
+          skipRef.current.delete(s.line.id)
+          if (reward.lap.completed) {
+            skipRef.current.clear()
+            setLapJust(reward.lap)
+          }
+        }
       }
 
       sfx.complete()
@@ -415,6 +580,9 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
         wrapped,
         carried: !!carry,
         fen: s.fen,
+        tier: tierOf(s.line),
+        userMovesPlayed,
+        roundDone,
       })
       clearCompleteTimer()
       // A line with a tail first plays it on the board (see the tail effect below).
@@ -508,10 +676,12 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
     const done = initedFor.current
     if (done && done.rep === rep && done.pool === pool) return
     initedFor.current = { rep, pool }
+    // A rebuilt pool starts a new round (its line ids may have changed).
+    roundRef.current = null
     // Avoid the line just played, also when coming back to the trainer.
     const prevId = stateRef.current?.line.id ?? resumed?.lineId
     const c = chooseLine(prevId)
-    if (c) startLine(c.line, c.index, prevId)
+    if (c) startLine(c.line, c.index, prevId, c.startPly)
     else {
       stateRef.current = null
       setState(null)
@@ -600,8 +770,16 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
   const nextLine = useCallback(() => {
     const prevId = stateRef.current?.line.id
     const c = chooseLine(prevId)
-    if (c) startLine(c.line, c.index, prevId)
+    if (c) startLine(c.line, c.index, prevId, c.startPly)
   }, [chooseLine, startLine])
+
+  const newRound = useCallback(() => {
+    if (mode !== 'main') return
+    roundRef.current = null
+    const prevId = stateRef.current?.line.id
+    const c = chooseLine(prevId)
+    if (c) startLine(c.line, c.index, prevId, c.startPly)
+  }, [mode, chooseLine, startLine])
 
   const setLearnMode = useCallback((on: boolean) => {
     learnRef.current = on
@@ -620,6 +798,16 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
   }, [])
 
   const closeComplete = useCallback(() => setShowComplete(false), [])
+
+  // Lap progress, read from the profile (the store rolls the lap over; stale ids are ignored).
+  const lapRec = mode === 'lap' ? getActiveProfile()?.laps?.[openingId] : undefined
+  const lap = useMemo<LapView | null>(() => {
+    if (mode !== 'lap') return null
+    const doneIds = new Set(lapRec?.done ?? [])
+    let done = 0
+    for (const l of pool) if (doneIds.has(l.id)) done++
+    return { n: lapRec?.n ?? 1, done, total: pool.length, includesPlanB: includePlanB, justCompleted: lapJust }
+  }, [mode, lapRec, pool, includePlanB, lapJust])
 
   const feedback = state?.feedback ?? sticky
   const liveInsight = insight && state && state.phase === 'wrongMove' && state.feedback?.id === insight.feedbackId ? insight : null
@@ -648,5 +836,9 @@ export function useTrainer(rep: Repertoire | null, opts: UseTrainerOptions): Tra
     sessionLines,
     shake,
     runStats,
+    round: mode === 'main' ? round : null,
+    lap,
+    skippedUserMoves: state ? skippedUserMoves(state) : 0,
+    newRound,
   }
 }

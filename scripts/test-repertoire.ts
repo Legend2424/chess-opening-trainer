@@ -112,6 +112,18 @@ function check(rep: Repertoire, opts: BuildOptions, label: string): void {
       for (let b = 0; b < keys.length; b++)
         if (a !== b) assert.ok(!keys[b].startsWith(keys[a] + ' '), `${ctx}: ${lines[a].id} is a prefix of ${lines[b].id} in ${cid}`)
     assert.ok(lines.filter((l) => l.name === 'Main line').length <= 1, `${ctx}: several "Main line" in ${cid}`)
+    // Practice tiers (docs/practice-structure.md §1; scripts/test-tiers.ts has the details): set on
+    // every build, exactly one main line per chapter (its first line), parents earlier in the chapter.
+    const mains = lines.filter((l) => l.tier === 'main')
+    assert.equal(mains.length, 1, `${ctx}: one main line in ${cid}`)
+    assert.equal(mains[0].indexInChapter, 0)
+    for (const l of lines) {
+      assert.ok(l.tier === 'main' || l.tier === 'key' || l.tier === 'deep' || l.tier === 'planb', `${ctx}: ${l.id} tier`)
+      assert.ok(Number.isInteger(l.deviations) && Number.isInteger(l.branchPly) && Number.isInteger(l.ownUserMoves) && Number.isInteger(l.startPly))
+      assert.ok(l.startPly! <= l.branchPly! && l.branchPly! < l.moves.length && l.ownUserMoves! <= l.userMoveCount)
+      if (l.indexInChapter === 0) assert.equal(l.parentLineId, undefined)
+      else assert.ok(lines.slice(0, l.indexInChapter).some((p) => p.id === l.parentLineId), `${ctx}: ${l.id} parent`)
+    }
   }
 
   // across chapters (same start + moves): no duplicates, no strict prefixes — except that a CORE

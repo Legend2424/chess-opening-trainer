@@ -10,7 +10,9 @@ import { formatDuration, timeSummary } from '../../store/timeSpent.ts'
 import { itemsOfKind } from '../../store/catalog.ts'
 import { levelForXp } from '../../store/levels.ts'
 import { DEFAULT_MAX_PLY, OPENINGS } from '../../data/openings.ts'
-import { previewRepertoire, useRepertoires } from '../../chess/useRepertoires.ts'
+import { previewRepertoire, useRepertoires, type RepertoireState } from '../../chess/useRepertoires.ts'
+import { movesLabel } from '../../chess/repertoire.ts'
+import { TIER_META, TIER_ORDER, findMoveConflicts, lapLines, tierCounts, tierOf } from '../../chess/lineTiers.ts'
 import { Avatar, Button, Card, Chip, CoinBadge, Modal, Toggle, cx, toast } from '../../components/ui/index.ts'
 import { ConfirmModal, plural, timeAgo, useNow } from './common.tsx'
 
@@ -659,6 +661,13 @@ export function TrainingSection() {
   const reps = useRepertoires()
   const [pending, setPending] = useState<PendingChange | null>(null)
   const goal = data.parent.dailyGoalLines
+  const includePlanB = data.parent.includePlanB !== false
+
+  const setPlanB = (on: boolean) => {
+    const r = actions.setIncludePlanB(on)
+    if (r.ok) toast.success(on ? 'Plan B lines are back in the laps.' : 'Laps now cover the must-know lines only.', '🌳')
+    else toast.error(r.message ?? 'Could not change that.')
+  }
 
   const setGoal = (n: number) => {
     const v = Math.max(3, Math.min(10, n))
@@ -722,6 +731,33 @@ export function TrainingSection() {
         </div>
       </Card>
 
+      <Card padding="sm" className="pz-card">
+        <SectionHead icon="🌳" title="Laps" />
+        <Toggle
+          checked={includePlanB}
+          onChange={setPlanB}
+          label="🅱️ Plan B lines in laps"
+          description="The coach's second-choice moves. Off = laps cover only the lines your child must know."
+          onIcon="✓"
+        />
+        {reps.status === 'ready' && (
+          <p className="pz-help">
+            One lap now:{' '}
+            {OPENINGS.map((o, i) => {
+              const r = reps.byId[o.id]
+              return r ? (
+                <span key={o.id}>
+                  {i > 0 && ' · '}
+                  {o.emoji} {plural(lapLines(r.lines, includePlanB).length, 'line')}
+                </span>
+              ) : null
+            })}
+            . Progress is kept either way.
+          </p>
+        )}
+      </Card>
+
+
       {OPENINGS.map((o) => {
         const ply = data.parent.maxPly[o.id] ?? DEFAULT_MAX_PLY
         const known = LENGTHS.some((l) => l.value === ply)
@@ -767,6 +803,8 @@ export function TrainingSection() {
           </Card>
         )
       })}
+
+      <PracticeStructureCard reps={reps} />
 
       <ConfirmModal
         open={!!pending}
@@ -827,6 +865,175 @@ export function TrainingSection() {
         )}
       </ConfirmModal>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Practice structure (read-only; docs/practice-structure.md §1, §5.5)
+// ---------------------------------------------------------------------------
+
+/** How many plies of each chapter's main line the card shows. */
+const MAIN_LINE_PLIES = 8
+
+function PracticeStructureCard({ reps }: { reps: RepertoireState }) {
+  const blocks = useMemo(
+    () =>
+      OPENINGS.map((def) => {
+        const rep = reps.byId[def.id]
+        if (!rep) return null
+        const chapters = rep.chapters
+          .map((ch) => {
+            const lines = rep.lines.filter((l) => l.chapterId === ch.id)
+            return { id: ch.id, title: ch.title, total: lines.length, counts: tierCounts(lines), main: lines.find((l) => tierOf(l) === 'main') }
+          })
+          .filter((c) => c.total > 0)
+        let conflicts: ReturnType<typeof findMoveConflicts> = []
+        try {
+          conflicts = findMoveConflicts(rep)
+        } catch {
+          conflicts = []
+        }
+        // Plan B is more than half of the chapter: maybe the coach's first move isn't the one she means.
+        const planBHeavy = chapters.filter((c) => c.counts.planb * 2 > c.total)
+        return { def, total: rep.lines.length, totals: tierCounts(rep.lines), chapters, conflicts, planBHeavy }
+      }),
+    [reps],
+  )
+
+  return (
+    <Card padding="sm" className="pz-card">
+      <SectionHead icon="🧭" title="Practice structure" />
+      <p className="pz-help">
+        ⭐ <b>Main line</b>: the coach's first choice at every move. 🔑 <b>Key reply</b>: the opponent tries something else once. 🌿{' '}
+        <b>Deeper line</b>: they try something else again later. 🅱️ <b>Plan B</b>: the coach's second-choice move for your child —
+        optional, the first choice always works too.
+      </p>
+      {reps.status === 'loading' && (
+        <p className="pz-help">
+          <span className="meta-spinner" aria-hidden /> Loading lines…
+        </p>
+      )}
+      {reps.status === 'error' && <p className="pz-help">The lines didn't load, so the structure can't be shown right now.</p>}
+      {blocks.map((b) => {
+        if (!b) return null
+        const asks = b.conflicts.length + b.planBHeavy.length
+        return (
+          <details key={b.def.id} className="pz-struct" style={{ ['--pz-accent' as string]: b.def.accent }}>
+            <summary className="pz-struct__sum">
+              <span className="pz-struct__emoji" style={{ background: b.def.accent }} aria-hidden>
+                {b.def.emoji}
+              </span>
+              <span className="pz-struct__head">
+                <span className="pz-struct__name">{b.def.name}</span>
+                <span className="pz-struct__counts">
+                  {plural(b.total, 'line')} ·{' '}
+                  {TIER_ORDER.map((t, i) => (
+                    <span key={t}>
+                      {i > 0 && ' · '}
+                      {TIER_META[t].emoji} {b.totals[t]}
+                    </span>
+                  ))}
+                </span>
+              </span>
+              {asks > 0 && (
+                <Chip tone="gold" icon="❓" className="pz-struct__asks">
+                  {asks} to ask
+                </Chip>
+              )}
+            </summary>
+
+            <div className="pz-struct__body">
+              <div className="pz-struct__scroll">
+                <table className="pz-struct__table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Chapter</th>
+                      <th scope="col">Lines</th>
+                      {TIER_ORDER.map((t) => (
+                        <th key={t} scope="col" title={TIER_META[t].plural}>
+                          {TIER_META[t].emoji}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {b.chapters.map((c) => (
+                      <tr key={c.id}>
+                        <th scope="row">{c.title}</th>
+                        <td className="num">{c.total}</td>
+                        {TIER_ORDER.map((t) => (
+                          <td key={t} className={cx('num', c.counts[t] === 0 && 'is-zero')}>
+                            {c.counts[t]}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr>
+                      <th scope="row">Total</th>
+                      <td className="num">{b.total}</td>
+                      {TIER_ORDER.map((t) => (
+                        <td key={t} className="num">
+                          {b.totals[t]}
+                        </td>
+                      ))}
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+
+              <div className="pz-struct__group">
+                <span className="pz-field__label">⭐ Main line of each chapter</span>
+                <ul className="pz-struct__list">
+                  {b.chapters.map((c) =>
+                    c.main ? (
+                      <li key={c.id}>
+                        <b>{c.title}</b>{' '}
+                        <span className="pz-struct__moves">
+                          {movesLabel(c.main.moves.slice(0, MAIN_LINE_PLIES))}
+                          {c.main.moves.length > MAIN_LINE_PLIES ? ' …' : ''}
+                        </span>
+                      </li>
+                    ) : null,
+                  )}
+                </ul>
+              </div>
+
+              {asks > 0 && (
+                <div className="pz-struct__group pz-struct__ask">
+                  <span className="pz-field__label">❓ Ask the coach</span>
+                  <ul className="pz-struct__list">
+                    {b.conflicts.map((c) => (
+                      <li key={c.fenBefore}>
+                        Same position, two different first choices:{' '}
+                        {c.moves.map((m, i) => (
+                          <span key={`${m.chapterId}${m.label}`}>
+                            {i > 0 && ' vs '}
+                            <b>{m.chapterTitle}</b> plays <span className="pz-struct__moves">{m.label}</span>
+                          </span>
+                        ))}
+                        . Which one should the kids learn?
+                      </li>
+                    ))}
+                    {b.planBHeavy.map((c) => (
+                      <li key={c.id}>
+                        <b>{c.title}</b>: {c.counts.planb} of {c.total} lines are Plan B. Is the first move in that chapter really the main
+                        one?
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </details>
+        )
+      })}
+      <p className="pz-help">
+        The first move in each Lichess chapter is treated as the main move. To change it, move the variation first on Lichess and
+        import the study again — progress is kept.
+      </p>
+    </Card>
   )
 }
 

@@ -20,6 +20,15 @@ export const WRONG_LINES = [
 
 export const PRAISE_LINES = ['Nice move! 👍', "That's it! ✅", 'Yes! Spot on! 🎯', 'Great memory! 🧠', 'Correct! ✨'] as const
 
+/** Branch start (lap mode): the shared start was played for the kid. */
+export const SKIP_AHEAD_LINE = '⏩ Skipped ahead! You know how this starts — the grey moves were played for you.'
+
+/** Main-line round: a line finished with a mistake comes back once at the end. */
+export const REQUEUE_LINE = "Let's fix that one at the end 💪"
+
+/** Leaving a main-line round part-way. */
+export const LEAVE_ROUND_LINE = 'Lines you finished still count — the round bonus needs the whole round.'
+
 export const YOUR_MOVE_LINES = [
   'Your move! What does your coach play here?',
   "Your turn! What's the move from your study? 🤔",

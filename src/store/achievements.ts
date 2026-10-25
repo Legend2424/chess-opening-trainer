@@ -8,6 +8,7 @@ import type { AchievementDef, LineResultInput, Profile, Repertoire } from '../ty
 import { OPENINGS } from '../data/openings.ts'
 import { itemById } from './catalog.ts'
 import { isLineMastered } from './rewards.ts'
+import { lapOf, medalOf, readiness } from './mastery.ts'
 
 /** LineResultInput plus an optional extra the trainer may pass for "Never give up". */
 export type LineResultInputX = LineResultInput & {
@@ -33,6 +34,13 @@ const MASTER_NAMES: Record<string, { name: string; emoji: string }> = {
   sicilian: { name: 'Dragon Tamer', emoji: '🐉' },
   london: { name: 'Big Ben', emoji: '🏰' },
   'vs-d4': { name: 'Gatekeeper', emoji: '🛡️' },
+}
+
+/** "Every main line gold" achievement names (docs/practice-structure.md §4.6). */
+const GOLD_NAMES: Record<string, string> = {
+  sicilian: 'Golden Dragon',
+  london: 'Golden Tower',
+  'vs-d4': 'Golden Gate',
 }
 
 function localHour(ms: number): number {
@@ -80,6 +88,38 @@ function openingMastered(p: Profile, ctx: AchievementContext, openingId: string)
   return allReps(ctx).some((rep) => rep.opening.id === openingId && isOpeningMastered(p, rep))
 }
 
+/** Lines of the opening's CORE chapters (extras don't count, like isOpeningMastered). */
+function coreLines(rep: Repertoire): Repertoire['lines'] {
+  const core = new Set(rep.opening.chapters.map((c) => c.id))
+  return rep.lines.filter((l) => core.has(l.chapterId))
+}
+
+/** True if the opening has main lines and every one of them has a gold medal. */
+export function allMainsGold(p: Profile, rep: Repertoire): boolean {
+  const mains = coreLines(rep).filter((l) => l.tier === 'main')
+  return mains.length > 0 && mains.every((l) => medalOf(p.lineStats[l.id]) === 3)
+}
+
+/** Tournament ready (mastery.readiness) over the opening's core lines. */
+export function isTournamentReady(p: Profile, rep: Repertoire): boolean {
+  return readiness(coreLines(rep), p.lineStats).ready
+}
+
+function openingAllGold(p: Profile, ctx: AchievementContext, openingId: string): boolean {
+  return allReps(ctx).some((rep) => rep.opening.id === openingId && allMainsGold(p, rep))
+}
+
+function openingReady(p: Profile, ctx: AchievementContext, openingId: string): boolean {
+  return allReps(ctx).some((rep) => rep.opening.id === openingId && isTournamentReady(p, rep))
+}
+
+/** Highest lap number reached in any opening (3 laps finished = lap 4). */
+function maxLapNumber(p: Profile): number {
+  let n = 1
+  for (const id of Object.keys(p.laps ?? {})) n = Math.max(n, lapOf(p, id).n)
+  return n
+}
+
 function count(id: string, name: string, emoji: string, coins: number, description: string, test: (p: Profile) => boolean): AchievementRule {
   return { id, name, emoji, coins, description, test: (p) => test(p) }
 }
@@ -123,6 +163,34 @@ const RULES: AchievementRule[] = [
       test: (p, ctx) => openingMastered(p, ctx, o.id),
     }
   }),
+  // Practice structure: main-line rounds, medals, tournament ready, laps
+  count('round-1', 'Warmed Up', '🏃', 20, 'Finish a Main Lines round.', (p) => (p.totals.rounds ?? 0) >= 1),
+  count(
+    'clean-round',
+    'Clean Sweep',
+    '🧹',
+    50,
+    'Finish a Main Lines round with every line perfect on the first try.',
+    (p) => (p.totals.cleanRounds ?? 0) >= 1,
+  ),
+  ...OPENINGS.map<AchievementRule>((o) => ({
+    id: `gold-${o.id}`,
+    name: GOLD_NAMES[o.id] ?? `Golden ${o.name}`,
+    emoji: '🥇',
+    coins: 100,
+    description: `Win a gold medal on every main line of the ${o.name}.`,
+    test: (p, ctx) => openingAllGold(p, ctx, o.id),
+  })),
+  ...OPENINGS.map<AchievementRule>((o) => ({
+    id: `ready-${o.id}`,
+    name: 'Tournament Ready',
+    emoji: '🏆',
+    coins: 200,
+    description: `Get Tournament Ready in the ${o.name}: every main line gold and every key reply mastered.`,
+    test: (p, ctx) => openingReady(p, ctx, o.id),
+  })),
+  count('lap-1', 'Tree Climber', '🌳', 75, 'Finish a lap: play every line of an opening.', (p) => (p.totals.laps ?? 0) >= 1),
+  count('lap-3', 'Evergreen', '🌲', 150, 'Finish 3 laps of one opening.', (p) => maxLapNumber(p) >= 4),
   // Daily / time of day / grit
   {
     id: 'triple-threat',
