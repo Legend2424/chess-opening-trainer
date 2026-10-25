@@ -91,7 +91,22 @@ export interface Line {
   tail?: MoveNode[]
   /** The tail demonstrates a mistake by the kid's side (a trap), not just the opponent's reply. */
   tailIsTrap?: boolean
+  /** Computed on every build by classifyLines(); never stored, never part of the id. */
+  tier?: LineTier
+  /** Moves that are not the chapter tree's first choice (children[0]). */
+  deviations?: number
+  /** Plies shared with parentLineId; 0 for the chapter main line. */
+  branchPly?: number
+  /** The earlier line of the same chapter this one branches off (longest shared start). */
+  parentLineId?: string
+  /** Kid moves from branchPly to the end. */
+  ownUserMoves?: number
+  /** Where a branch-start run begins (index of the kid's last move before branchPly); 0 = move 1. */
+  startPly?: number
 }
+
+/** Practice tier (docs/practice-structure.md §1). */
+export type LineTier = 'main' | 'key' | 'deep' | 'planb'
 
 export interface ChapterRef {
   id: string // Lichess chapter id
@@ -142,6 +157,19 @@ export interface LineStats {
   learnPending?: boolean
   /** The one full-pay quick retry after a failed run was used (further quick repeats are "farmed"). */
   quickRetryUsed?: boolean
+  /** Distinct local days with a perfect (non-learn) run. Absent on old saves: read via perfectDaysOf(). */
+  perfectDays?: number
+  /** Local 'YYYY-MM-DD' of the last perfect run. */
+  lastPerfectDay?: string
+  /** Main-line medal earned (1 bronze, 2 silver, 3 gold); paid once each, never lost. */
+  medal?: 1 | 2 | 3
+}
+
+export interface LapRecord {
+  /** Current lap number (1-based). */
+  n: number
+  /** Line ids finished (2+ stars, not learn mode) in the current lap. */
+  done: string[]
 }
 
 export type ItemKind = 'board' | 'pieces' | 'avatar' | 'trophy' | 'effect' | 'title'
@@ -226,7 +254,21 @@ export interface Profile {
   streakDays: number // consecutive days the daily goal was met
   lastGoalDate: string // 'YYYY-MM-DD' of the last day the goal was met
   bestCombo: number
-  totals: { lines: number; perfects: number; mistakesFixed: number; engineWins: number; blundersPunished: number }
+  totals: {
+    lines: number
+    perfects: number
+    mistakesFixed: number
+    engineWins: number
+    blundersPunished: number
+    /** Main-line rounds finished / clean ones / laps finished (all openings). */
+    rounds?: number
+    cleanRounds?: number
+    laps?: number
+  }
+  /** Per opening id. Absent = lap 1, nothing done. */
+  laps?: Record<string, LapRecord>
+  /** Fastest clean main-line round per opening id (ms). */
+  mainRoundBest?: Record<string, number>
   redemptions: Redemption[]
   history: CoinEvent[] // newest first, capped at 200
   settings: ProfileSettings
@@ -260,6 +302,8 @@ export interface ParentSettings {
   maxPly: Record<string, number> // per opening id; 0 = no limit
   enabledExtras: string[] // extra chapter ids switched on
   dailyGoalLines: number // default 5
+  /** Plan B lines are part of laps. Absent = true. */
+  includePlanB?: boolean
 }
 
 export interface AppData {
@@ -275,7 +319,7 @@ export interface AppData {
 // Trainer <-> store
 // ---------------------------------------------------------------------------
 
-export type TrainerMode = 'random' | 'inorder' | 'chapter'
+export type TrainerMode = 'random' | 'inorder' | 'chapter' | 'main' | 'lap'
 
 export interface LineResultInput {
   line: Line
@@ -288,6 +332,20 @@ export interface LineResultInput {
   combo: number // consecutive perfect lines in this session INCLUDING this one (0 if not perfect)
   opponentBlunderPunished: boolean
   now: number
+  /** Kid moves actually played (a branch-start run skips some). Absent = the whole line. */
+  userMovesPlayed?: number
+}
+
+export interface LapResult {
+  openingId: string
+  /** The lap this completion counted toward. */
+  n: number
+  done: number
+  total: number
+  /** This completion finished lap n (the profile is now on lap n + 1). */
+  completed: boolean
+  /** Lap bonus paid with this completion (0 unless completed). */
+  coins: number
 }
 
 export interface RewardLine {
@@ -321,6 +379,10 @@ export interface Reward {
   levelUp: { from: LevelInfo; to: LevelInfo } | null
   dailyGoalJustMet: boolean
   lineMastered: boolean
+  /** A main-line medal was earned with this completion. */
+  medal?: { level: 1 | 2 | 3; coins: number }
+  /** Present when this completion counted toward a lap. */
+  lap?: LapResult
 }
 
 // ---------------------------------------------------------------------------
