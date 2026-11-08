@@ -203,10 +203,10 @@ await test('levels: boundaries', () => {
   assert.equal(levelProgress(425), 0.5)
 })
 
-await test('defaults: David & Minka, Pokémon pack, free items owned', () => {
+await test('defaults: David, Minka & Chris, Pokémon pack, free items owned', () => {
   const d = fresh()
   assert.equal(d.version, 1)
-  assert.deepEqual(d.profiles.map((p) => p.name), ['David', 'Minka'])
+  assert.deepEqual(d.profiles.map((p) => p.name), ['David', 'Minka', 'Chris'])
   assert.equal(d.activeProfileId, null)
   assert.deepEqual(d.parent.rewards, [{ id: 'pokemon-pack', name: 'Pokémon booster pack', emoji: '🎴', cost: 1500, enabled: true, maxPerWeek: 2 }])
   assert.deepEqual(d.parent.maxPly, { sicilian: 30, london: 30, 'vs-d4': 30 })
@@ -1115,12 +1115,49 @@ await test('history: capped at 200 newest first', () => {
 await test('storage: no localStorage under node → defaults, save returns false, never throws', () => {
   storage.setStorageBackend(null)
   const d = storage.loadAppData(NOW)
-  assert.deepEqual(d.profiles.map((p) => p.id), ['david', 'minka'])
+  assert.deepEqual(d.profiles.map((p) => p.id), ['david', 'minka', 'chris'])
   assert.equal(storage.saveAppData(d), false)
   // review fix #9: the "not saving" banner has a reason to show
   assert.equal(storage.getLastSaveError(), storage.STORAGE_UNAVAILABLE_ERROR)
   storage.setStorageBackend(undefined)
   assert.doesNotThrow(() => storage.loadAppData(NOW))
+})
+
+await test('new player Chris: a save with only David & Minka keeps them exactly and gets a fresh Chris', () => {
+  // A realistic two-player save from before Chris existed: coins, XP, progress, purchases, history.
+  let d: AppData = { ...fresh(), profiles: fresh().profiles.filter((p) => p.id !== 'chris') }
+  d = patchProfile(d, 'david', {
+    coins: 1234, xp: 4321, streakDays: 4, bestCombo: 7,
+    lineStats: { abc123: stats({ box: 3, perfects: 9, perfectDays: 5, medal: 1 }) },
+    owned: [...FREE_ITEM_IDS, 'board:ocean'], equipped: { ...prof(fresh(), 'david').equipped, board: 'ocean' },
+    history: [{ at: NOW - HOUR, delta: 25, reason: 'Line complete' }],
+  })
+  d = patchProfile(d, 'minka', { coins: 987, xp: 2000, name: 'Minka', laps: { sicilian: { n: 2, done: ['abc123'] } } })
+  d = { ...d, activeProfileId: 'minka' }
+  const before = JSON.parse(JSON.stringify(d)) as AppData
+  const v = storage.validateAppData(JSON.parse(JSON.stringify(d)), NOW)
+  assert.ok(v.ok)
+  if (!v.ok) return
+  assert.deepEqual(v.data.profiles.map((p) => p.id), ['david', 'minka', 'chris'])
+  // David and Minka are byte-for-byte what was saved.
+  assert.deepEqual(v.data.profiles[0], before.profiles[0])
+  assert.deepEqual(v.data.profiles[1], before.profiles[1])
+  assert.equal(v.data.activeProfileId, 'minka')
+  // Chris starts fresh.
+  const c = v.data.profiles[2]
+  assert.deepEqual([c.name, c.coins, c.xp, Object.keys(c.lineStats).length], ['Chris', 0, 0, 0])
+  // Backups from before Chris import the same way; saving and loading again keeps one Chris.
+  const parsed = storage.parseBackup(storage.exportBackup(d, NOW), NOW)
+  assert.ok(parsed.ok)
+  if (parsed.ok) assert.deepEqual(parsed.data.profiles.map((p) => [p.id, p.coins]), [['david', 1234], ['minka', 987], ['chris', 0]])
+  const again = storage.validateAppData(JSON.parse(JSON.stringify(v.data)), NOW + DAY)
+  assert.ok(again.ok)
+  if (again.ok) assert.deepEqual(again.data.profiles.map((p) => p.id), ['david', 'minka', 'chris'])
+  // A renamed Chris keeps the new name (no second "chris" is added).
+  const renamed = ops.renameProfile(v.data, 'chris', 'Christopher').data
+  const back = storage.validateAppData(JSON.parse(JSON.stringify(renamed)), NOW)
+  assert.ok(back.ok)
+  if (back.ok) assert.deepEqual(back.data.profiles.map((p) => p.name), ['David', 'Minka', 'Christopher'])
 })
 
 await test('storage: save/load round trip, study stored separately, corrupt data stashed', () => {

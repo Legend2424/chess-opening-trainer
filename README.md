@@ -1,6 +1,6 @@
 # Opening Quest ♞⭐
 
-A gamified chess **opening trainer** for David and Minka, built for iPad (works in any browser).
+A gamified chess **opening trainer** for David, Minka and Chris, built for iPad (works in any browser).
 Pick who's playing, pick an opening, and play through your coach's lines. Every line earns
 coins; perfect lines earn bonus coins. Spend coins on new boards, piece sets, avatars and
 trophies, or save up and ask a parent to redeem them for a Pokémon pack.

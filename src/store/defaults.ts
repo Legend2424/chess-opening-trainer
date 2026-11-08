@@ -95,6 +95,9 @@ interface ProfileSeed {
 export const DEFAULT_PROFILES: readonly ProfileSeed[] = [
   { id: 'david', name: 'David', avatar: '🦉', color: '#3b82f6' },
   { id: 'minka', name: 'Minka', avatar: '🐱', color: '#ec4899' },
+  // Added November 2026. Saved data from before gets Chris appended on load
+  // (storage.ts withDefaultPlayers); David's and Minka's data is left untouched.
+  { id: 'chris', name: 'Chris', avatar: '🐶', color: '#10b981' },
 ]
 
 export function createProfile(seed: ProfileSeed, now: number): Profile {

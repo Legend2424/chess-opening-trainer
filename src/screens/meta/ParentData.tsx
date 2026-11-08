@@ -455,7 +455,7 @@ function BackupCard() {
     <Card padding="sm" className="pz-card">
       <h2 className="meta-section-title">💾 Backup</h2>
       <p className="pz-help">
-        Everything — both players, coins, items, progress and rewards — in one file (<code>{backupFileName()}</code>). The PIN is never
+        Everything — all players, coins, items, progress and rewards — in one file (<code>{backupFileName()}</code>). The PIN is never
         included. Save it to Files or send it to yourself now and then.
       </p>
       <div className="pz-row-btns">

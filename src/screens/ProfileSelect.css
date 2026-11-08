@@ -46,8 +46,21 @@
   gap: clamp(18px, 3vw, 36px);
   width: 100%;
 }
+/* Three players (David, Minka, Chris): one row on tablets, landscape and portrait. */
 .ps__cards--many {
-  grid-template-columns: repeat(auto-fit, minmax(260px, 320px));
+  grid-template-columns: repeat(3, minmax(0, 300px));
+  gap: clamp(16px, 2.4vw, 30px);
+}
+@media (min-width: 641px) and (min-height: 561px) {
+  .ps__cards--many .ps-card__top {
+    padding: 22px 14px 18px;
+  }
+  .ps__cards--many .ps-card__avatar {
+    --size: 108px !important;
+  }
+  .ps__cards--many .ps-card__body {
+    padding: 2px 16px 20px;
+  }
 }
 
 .ps-card {
@@ -261,6 +274,15 @@
   }
   .ps-card__name {
     font-size: 2.7rem;
+  }
+  .ps__cards--many {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .ps__cards--many .ps-card__avatar {
+    --size: 124px !important;
+  }
+  .ps__cards--many .ps-card__name {
+    font-size: 2.2rem;
   }
 }
 

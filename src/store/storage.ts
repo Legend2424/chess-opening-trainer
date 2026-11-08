@@ -22,6 +22,8 @@ import { findItem, itemById, DEFAULT_EQUIPPED, FREE_ITEM_IDS } from './catalog.t
 import {
   createDefaultAppData,
   createDefaultParentSettings,
+  createProfile,
+  DEFAULT_PROFILES,
   defaultSeedFor,
   emptyDaily,
   HISTORY_CAP,
@@ -490,6 +492,18 @@ function normParent(x: unknown): ParentSettings | string {
  * repairs harmless gaps (missing settings, unknown items, bad history rows).
  * Returns a brand-new object; the input is never used by reference.
  */
+/**
+ * A player added to the app later (Chris, November 2026) is appended to saved
+ * data / backups that don't have them yet, as a fresh profile at the end of the
+ * list. Existing players are never changed, renamed or reordered.
+ */
+function withDefaultPlayers(profiles: Profile[], now: number): void {
+  for (const seed of DEFAULT_PROFILES) {
+    if (profiles.length >= MAX_PROFILES) return
+    if (!profiles.some((p) => p.id === seed.id)) profiles.push(createProfile(seed, now))
+  }
+}
+
 export function validateAppData(rawIn: unknown, now: number = Date.now()): ValidateResult {
   if (!isObj(rawIn)) return { ok: false, error: "This doesn't look like Opening Quest data." }
   let raw: Obj = rawIn
@@ -511,6 +525,7 @@ export function validateAppData(rawIn: unknown, now: number = Date.now()): Valid
     if (profiles.some((o) => o.id === p.id)) return { ok: false, error: `Player "${p.id}" appears twice.` }
     profiles.push(p)
   }
+  withDefaultPlayers(profiles, now)
   const parent = normParent(raw.parent)
   if (typeof parent === 'string') return { ok: false, error: parent }
 
